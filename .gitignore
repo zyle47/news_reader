@@ -1,0 +1,42 @@
+# Python environments and generated tooling state
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local configuration and secrets
+config.toml
+.env
+.env.*
+*.secret
+
+# Article Reader runtime data (must never be synchronized through Git)
+.article-reader/
+runtime/
+data/
+models/
+audio/
+tmp/
+exports/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Platform/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,25 @@
+schema_version = 1
+
+[[passages]]
+id = "en-smoke"
+language = "en"
+script = "latin"
+text = "Dr. Morgan arrived on 11 September 2026. The total was 1,234.56, and every sentence must remain audible."
+
+[[passages]]
+id = "de-smoke"
+language = "de"
+script = "latin"
+text = "Dr. Müller prüft am 11. September 2026 die Größenordnung von 1.234,56 Euro. Kein Satz darf fehlen."
+
+[[passages]]
+id = "sr-latin-smoke"
+language = "sr"
+script = "latin"
+text = "Prof. Marković čita članak 11. septembra 2026. Reči ćirilica, džez, njiva, ljubav, šuma i đak moraju ostati jasne."
+
+[[passages]]
+id = "sr-cyrillic-smoke"
+language = "sr"
+script = "cyrillic"
+text = "Проф. Марковић чита чланак 11. септембра 2026. Речи љубав, њива, ђак, џез, ћирилица и шума морају остати јасне."

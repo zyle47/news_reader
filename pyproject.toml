@@ -1,0 +1,64 @@
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13"]
+build-backend = "uv_build"
+
+[project]
+name = "article-reader"
+version = "0.1.0"
+description = "A local-first article reader with replaceable text-to-speech engines."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.141.1,<0.142",
+    "jinja2>=3.1.6,<4",
+    "piper-tts>=1.8.0,<1.9",
+    "py3langid>=0.4.0,<0.5",
+    "trafilatura>=2.2.0,<2.3",
+    "urllib3>=2.7.0,<3",
+    "uvicorn>=0.52.4,<0.53",
+]
+classifiers = ["Private :: Do Not Upload"]
+
+[project.scripts]
+article-reader = "article_reader.cli:main"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.12,<3",
+    "mypy>=1.18,<2",
+    "pytest>=8.4,<10",
+    "ruff>=0.13,<1",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv", "runtime"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.uv.build-backend]
+source-include = [
+    ".python-version",
+    "start-reader.cmd",
+    "article-reader-project-plan.md",
+    "config.example.toml",
+    "docs/**",
+    "tests/**",
+    "uv.lock",
+]

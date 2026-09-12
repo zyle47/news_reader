@@ -5,11 +5,12 @@ aloud in Serbian, English, or German. The project is being implemented increment
 [`article-reader-project-plan.md`](article-reader-project-plan.md).
 
 The current increment includes the architecture, diagnostics, three approved local Piper voices,
-text preparation, and a security-hardened public-HTTP(S) article fetch/extraction pipeline. The
+text preparation, a security-hardened public-HTTP(S) article fetch/extraction pipeline, and a
+loopback browser preview reader. The
 fluent project owner approved the English, German, and Serbian voices for personal article reading
 after short and sustained listening. M2 now runs from a public URL through extraction, conservative
-language/script selection, and source-traceable speech segments. Persistence, audio jobs, and the
-browser reader come in later milestones.
+language/script selection, source-traceable speech segments, real Piper audio, and in-page playback.
+Durable jobs and saved reading history come in later milestones.
 
 ## Development setup
 
@@ -20,8 +21,25 @@ uv sync --locked
 uv run --locked article-reader doctor
 uv run --locked article-reader voices list
 uv run --locked article-reader evaluate-voices --fake --language sr
+uv run --locked article-reader serve
 uv run --locked pytest -q
 ```
+
+`serve` opens `http://localhost:8765/`. Paste an article URL, review the extracted text, choose its
+language/script when needed, generate audio, and listen without using the preparation CLI. The
+preview includes section navigation, 0.75x-1.5x speed, same-browser position restore, and
+cross-tab playback coordination. It is intentionally available only from this computer until LAN
+authentication is implemented.
+
+On the currently inspected Windows host, all three approved voices are installed under
+`runtime/voice-data`, so the direct command is:
+
+```powershell
+.\runtime\venv312\Scripts\python.exe -m article_reader --data-dir runtime\voice-data serve
+```
+
+Or simply double-click **`start-reader.cmd`** in this folder. Keep its small server window
+open while listening; closing it stops the local app.
 
 To try the real Piper engine, explicitly install an approved voice (downloads and SHA-256-verifies a
 real ~61 MiB model over HTTPS) and evaluate it:

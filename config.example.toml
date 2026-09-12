@@ -1,0 +1,42 @@
+# Copy this file to config.toml for machine-local changes. config.toml is ignored by Git.
+# Runtime data belongs on a local disk outside Git and cloud-synchronized folders.
+
+[server]
+bind = "127.0.0.1"
+port = 8765
+lan_mode = false
+
+[worker]
+processes = 1
+tts_threads = 2
+resident_models = 1
+max_waiting_chains = 10
+max_unfinished_request_chains_per_viewer = 1
+heartbeat_seconds = 5
+lease_seconds = 120
+max_automatic_recoveries = 1
+
+[fetch]
+connect_timeout_seconds = 5
+overall_timeout_seconds = 25
+max_redirects = 5
+max_response_bytes = 5242880
+max_decoded_bytes = 5242880
+max_article_characters = 100000
+max_url_characters = 4096
+
+[speech]
+max_chunk_characters = 600
+chunk_timeout_seconds = 120
+max_model_download_bytes = 209715200
+model_download_connect_timeout_seconds = 10
+model_download_overall_timeout_seconds = 300
+
+[cache]
+max_audio_bytes = 2147483648
+inactive_days = 7
+playback_lease_seconds = 180
+min_free_disk_bytes = 1073741824
+
+[history]
+max_saved_readings_per_viewer = 200

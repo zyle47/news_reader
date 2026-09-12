@@ -1,0 +1,64 @@
+schema_version = 1
+
+# Exact artifact provenance and technical and human evidence are recorded per entry and in
+# docs/VOICE_REVIEWS.md. Automatic selection remains restricted to 'approved'.
+
+[[voices]]
+id = "en_US-ljspeech-medium"
+display_name = "Piper English (US) - LJSpeech medium"
+language = "en"
+scripts = ["latin"]
+engine = "piper"
+engine_version = "1.8.0"
+sample_rate_hz = 22050
+source_url = "https://huggingface.co/rhasspy/piper-voices"
+source_revision = "1162a9173d0ce503555aed757976b7a9912eae4c"
+model_url = "https://huggingface.co/rhasspy/piper-voices/resolve/1162a9173d0ce503555aed757976b7a9912eae4c/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx"
+model_sha256 = "6f52a751e2349abe7a76735eb09dc1875298c77ea2342ffd2fef79ff81b87f22"
+config_url = "https://huggingface.co/rhasspy/piper-voices/resolve/1162a9173d0ce503555aed757976b7a9912eae4c/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx.json"
+config_sha256 = "141d612cc0a95ed7efc1ca936b845c2364967f2e9217c5dbfcf69fc4d6c65860"
+model_license_url = "https://huggingface.co/rhasspy/piper-voices/resolve/1162a9173d0ce503555aed757976b7a9912eae4c/README.md"
+data_license_url = "https://keithito.com/LJ-Speech-Dataset/"
+evaluation_status = "approved"
+evaluation_notes = """
+Piper voice en_US-ljspeech-medium from rhasspy/piper-voices revision 1162a9173d0c. Trained from scratch on the public-domain LJSpeech dataset; its MODEL_CARD does not record finetuning from another checkpoint. The checksum-verified installation passed real technical evaluation with piper-tts 1.8.0 on Windows 11 and CPython 3.12.14 on 2026-09-12: valid non-silent 22050 Hz audio at about 0.05 real-time factor. The fluent project owner accepted both short and sustained listening samples for personal article reading on 2026-09-12 and explicitly approved this voice."""
+
+[[voices]]
+id = "de_DE-thorsten-medium"
+display_name = "Piper German (DE) - Thorsten medium"
+language = "de"
+scripts = ["latin"]
+engine = "piper"
+engine_version = "1.8.0"
+sample_rate_hz = 22050
+source_url = "https://huggingface.co/rhasspy/piper-voices"
+source_revision = "1162a9173d0ce503555aed757976b7a9912eae4c"
+model_url = "https://huggingface.co/rhasspy/piper-voices/resolve/1162a9173d0ce503555aed757976b7a9912eae4c/de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx"
+model_sha256 = "7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819"
+config_url = "https://huggingface.co/rhasspy/piper-voices/resolve/1162a9173d0ce503555aed757976b7a9912eae4c/de/de_DE/thorsten/medium/de_DE-thorsten-medium.onnx.json"
+config_sha256 = "974adee790533adb273a1ac88f49027d2a1b8f0f2cf4905954a4791e79264e85"
+model_license_url = "https://huggingface.co/rhasspy/piper-voices/resolve/1162a9173d0ce503555aed757976b7a9912eae4c/README.md"
+data_license_url = "https://github.com/thorstenMueller/Thorsten-Voice"
+evaluation_status = "approved"
+evaluation_notes = """
+Piper voice de_DE-thorsten-medium from rhasspy/piper-voices revision 1162a9173d0c. The Thorsten-Voice dataset is CC0 according to its project and this voice's MODEL_CARD. The MODEL_CARD also states that the model was finetuned from the U.S. English Lessac checkpoint; the Lessac Blizzard-2013 recordings have a restrictive research-only license, so review that lineage before redistribution beyond local personal use. The checksum-verified installation passed real technical evaluation with piper-tts 1.8.0 on Windows 11 and CPython 3.12.14 on 2026-09-12: valid non-silent 22050 Hz audio at about 0.05 real-time factor. The fluent project owner accepted both short and sustained listening samples for personal article reading on 2026-09-12 and explicitly approved this voice. Approval does not remove the redistribution warning."""
+
+[[voices]]
+id = "sr-marko-medium"
+display_name = "Piper Serbian (community) - Marko medium"
+language = "sr"
+scripts = ["latin", "cyrillic"]
+engine = "piper"
+engine_version = "1.8.0"
+sample_rate_hz = 22050
+source_url = "https://huggingface.co/phantom9623/piper-serbian-tts"
+source_revision = "a71694f9ec3480f132dffaf7eb422d43aebd69e0"
+model_url = "https://huggingface.co/phantom9623/piper-serbian-tts/resolve/a71694f9ec3480f132dffaf7eb422d43aebd69e0/sr_Marko_medium.onnx"
+model_sha256 = "2d009fe6d43e25b9516b23f5e64f65af202e76f0e6940e452dfb45852a412a68"
+config_url = "https://huggingface.co/phantom9623/piper-serbian-tts/resolve/a71694f9ec3480f132dffaf7eb422d43aebd69e0/sr_Marko_medium.onnx.json"
+config_sha256 = "f3ce50b11c799b0134e678cccecfb8751a4990de32dd710625139c728a1714fb"
+model_license_url = "https://huggingface.co/phantom9623/piper-serbian-tts/resolve/a71694f9ec3480f132dffaf7eb422d43aebd69e0/README.md"
+data_license_url = "https://huggingface.co/phantom9623/piper-serbian-tts/resolve/a71694f9ec3480f132dffaf7eb422d43aebd69e0/README.md"
+evaluation_status = "approved"
+evaluation_notes = """
+Community Piper voice sr_Marko_medium from phantom9623/piper-serbian-tts revision a71694f9ec34, MIT-licensed according to its README. Its MODEL_CARD mislabels the sr language code as Slovenian, and its README says the voice was finetuned from a Slovenian base model rather than trained from documented Serbian recordings. The underlying speech dataset and license are undisclosed. Both Serbian scripts passed checksum-verified technical evaluation with real non-silent 22050 Hz audio at about 0.05 real-time factor; equivalent Latin and Cyrillic text produced identical IPA phonemes. On 2026-09-12 the fluent Serbian project owner accepted short and sustained listening samples in both Latin and Cyrillic for personal article reading and explicitly approved this voice. The provenance warning remains despite the listening approval."""

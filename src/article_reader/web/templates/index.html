@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#f4efe4">
+    <title>Article Reader</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#reader-main">Skip to reader</a>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Article Reader home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>Article Reader</span>
+      </a>
+      <span class="local-badge"><span aria-hidden="true"></span> Local preview</span>
+    </header>
+
+    <main id="reader-main">
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">Listen, don’t scroll</p>
+        <h1 id="page-title">Turn an article into a calm listening session.</h1>
+        <p class="lede">
+          Paste a public article link. The text and voice stay on this computer.
+        </p>
+
+        <form id="article-form" class="article-form">
+          <label for="article-url">Article URL</label>
+          <div class="url-row">
+            <input
+              id="article-url"
+              name="url"
+              type="url"
+              inputmode="url"
+              autocomplete="url"
+              placeholder="https://example.com/article"
+              maxlength="4096"
+              required
+            >
+            <button id="fetch-button" class="primary-button" type="submit">
+              Fetch article
+            </button>
+          </div>
+
+          <div class="options-row">
+            <div class="field-group">
+              <label for="language">Article language</label>
+              <select id="language" name="language">
+                <option value="auto">Detect automatically</option>
+                <option value="sr">Serbian</option>
+                <option value="en">English</option>
+                <option value="de">German</option>
+              </select>
+            </div>
+            <div id="script-group" class="field-group" hidden>
+              <label for="script">Serbian script</label>
+              <select id="script" name="script">
+                <option value="" selected disabled>Choose script</option>
+                <option value="latin">Latin</option>
+                <option value="cyrillic">Cyrillic</option>
+              </select>
+            </div>
+          </div>
+        </form>
+
+        <div id="status" class="status" role="status" aria-live="polite" hidden></div>
+      </section>
+
+      <section id="review-panel" class="workspace" aria-labelledby="article-title" hidden>
+        <div class="article-heading">
+          <div>
+            <p id="article-state" class="eyebrow"></p>
+            <h2 id="article-title"></h2>
+          </div>
+          <a id="source-link" class="source-link" target="_blank" rel="noreferrer">View source</a>
+        </div>
+
+        <div id="review-warning" class="review-warning" hidden>
+          <strong>Give this extraction a quick look.</strong>
+          <p id="review-message"></p>
+          <label class="check-row">
+            <input id="review-accepted" type="checkbox">
+            <span>I checked the extracted article and omitted sections.</span>
+          </label>
+        </div>
+
+        <div id="resolution-panel" class="resolution-panel" hidden>
+          <p id="resolution-message"></p>
+          <button id="resolve-button" class="secondary-button" type="button">
+            Approve and prepare
+          </button>
+        </div>
+
+        <div id="ready-panel" class="ready-panel" hidden>
+          <div class="field-group voice-field">
+            <label for="voice">Reading voice</label>
+            <select id="voice" name="voice"></select>
+            <small id="voice-help"></small>
+          </div>
+          <button id="generate-button" class="primary-button" type="button">
+            Generate audio
+          </button>
+        </div>
+
+        <article id="article-blocks" class="article-copy" aria-label="Extracted article"></article>
+      </section>
+
+      <section id="player-panel" class="player-shell" aria-labelledby="player-title" hidden>
+        <div class="player-topline">
+          <div>
+            <p class="eyebrow">Now reading</p>
+            <h2 id="player-title">Article audio</h2>
+          </div>
+          <p id="player-position" class="player-position"></p>
+        </div>
+
+        <p id="current-segment" class="current-segment"></p>
+        <audio id="audio-player" preload="metadata" controls></audio>
+
+        <div class="player-controls">
+          <button id="previous-button" class="icon-button" type="button">Previous section</button>
+          <button id="next-button" class="icon-button" type="button">Next section</button>
+          <label class="speed-control" for="playback-speed">
+            Speed
+            <select id="playback-speed">
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+            </select>
+          </label>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Runs on this computer · Article Reader {{ app_version }}</p>
+      <p>Preview mode does not save history yet.</p>
+    </footer>
+  </body>
+</html>
