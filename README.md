@@ -1,16 +1,18 @@
 # Article Reader
 
-Article Reader is a local-first application that will extract useful article text and read it
-aloud in Serbian, English, or German. The project is being implemented incrementally from
+Article Reader is a local-first application that extracts useful article text and reads it aloud
+in Serbian, English, or German. The project is being implemented incrementally from
 [`article-reader-project-plan.md`](article-reader-project-plan.md).
 
-The current increment includes the architecture, diagnostics, three approved local Piper voices,
-text preparation, a security-hardened public-HTTP(S) article fetch/extraction pipeline, and a
-loopback browser preview reader. The
-fluent project owner approved the English, German, and Serbian voices for personal article reading
-after short and sustained listening. M2 now runs from a public URL through extraction, conservative
-language/script selection, source-traceable speech segments, real Piper audio, and in-page playback.
-Durable jobs and saved reading history come in later milestones.
+The current increment adds durable jobs and audio to the architecture, diagnostics, three approved
+local Piper voices, text preparation, and the security-hardened public-HTTP(S) article
+fetch/extraction pipeline built in M0–M2. The fluent project owner approved the English, German,
+and Serbian voices for personal article reading after short and sustained listening. Article
+submission, review/language resolution, and audio generation now run as durable SQLite-backed jobs
+executed by one background worker: a URL submission returns immediately, the browser polls job and
+rendition state, and playback starts as soon as the first audio chunk is ready — before the rest of
+the article finishes generating. Reading history and playback position survive closing the page or
+restarting the app. LAN access and portable reading bundles remain later milestones.
 
 ## Development setup
 
@@ -25,11 +27,13 @@ uv run --locked article-reader serve
 uv run --locked pytest -q
 ```
 
-`serve` opens `http://localhost:8765/`. Paste an article URL, review the extracted text, choose its
-language/script when needed, generate audio, and listen without using the preparation CLI. The
-preview includes section navigation, 0.75x-1.5x speed, same-browser position restore, and
-cross-tab playback coordination. It is intentionally available only from this computer until LAN
-authentication is implemented.
+`serve` opens `http://localhost:8765/` and starts the durable worker in the background. Paste an
+article URL; the page queues it, polls until extraction finishes, then walks through review and
+language resolution when needed. Choose a voice to queue audio generation — playback starts on the
+first ready section instead of waiting for the whole article, and you can cancel or retry while it
+generates. The reader keeps section navigation, 0.75x-1.5x speed, cross-tab playback coordination,
+a recent-readings history list, and now persists playback position and history across restarts. It
+is intentionally available only from this computer until LAN authentication is implemented.
 
 On the currently inspected Windows host, all three approved voices are installed under
 `runtime/voice-data`, so the direct command is:

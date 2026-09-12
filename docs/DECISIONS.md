@@ -252,11 +252,194 @@ FastAPI 0.141, Uvicorn 0.52, and Jinja2 3.1 are normal locked runtime dependenci
 static assets are packaged with the application; no JavaScript build toolchain or remote asset is
 introduced.
 
+## ADR-017: Versioned SQLite migrations and repositories replace the transient preview state
+
+**Status:** Accepted, 2026-09-12
+
+`db/connection.py` owns one `Database` per data directory: it opens per-thread `sqlite3`
+connections with `PRAGMA foreign_keys = ON`, WAL journaling, and a 5-second busy timeout,
+and applies `db/migrations.py`'s ordered SQL migrations inside `BEGIN IMMEDIATE` transactions
+tracked by `PRAGMA user_version`. Opening a database whose `user_version` is newer than the
+running build's `CURRENT_SCHEMA_VERSION` raises `IncompatibleSchemaError` instead of
+resetting it — verified with a real refused-open test that leaves the file untouched.
+Migrations avoid forward-referencing foreign keys entirely (every `REFERENCES` points at a
+table already created earlier in the same migration) so schema application order never
+depends on SQLite's deferred foreign-key name resolution.
+
+Eight concrete repositories in `db/repositories/` (viewers, readings, articles, renditions,
+audio chunks, jobs, idempotency, progress) implement the `Protocol`s declared in the new
+`application/ports/persistence.py`. Domain and application modules depend only on those
+protocols and the plain-dataclass records they exchange, never on `sqlite3`; only `db/`,
+`worker/`, and `api/app.py` (the composition root for API wiring) import the concrete
+classes, preserving ADR-001's dependency rule. This let the durable job orchestration in
+`application/services/reading_service.py` and `worker/loop.py` be unit-tested against a real
+temporary SQLite file without any FastAPI or Piper dependency.
+
+The transient preview scaffold from ADR-016 (`application/services/preview_audio.py`,
+`storage/preview_audio.py`, `application/ports/audio.py`, and their tests) is deleted outright
+now that it is fully superseded, rather than kept alongside the durable path as dead weight.
+
+## ADR-018: One global FIFO job queue with per-claim generation tokens and `BEGIN IMMEDIATE` claiming
+
+**Status:** Accepted, 2026-09-12
+
+`jobs.claim_next` selects the oldest `queued` row (across both `prepare` and `synthesize`
+kinds, matching the plan's single sequential worker) and updates it to `running` inside one
+`BEGIN IMMEDIATE` transaction. SQLite's own writer-serialization — not application-level
+locking — is what makes two concurrent claimers resolve to exactly one winner; this is
+verified with a real two-thread race in `tests/test_job_queue.py`, not just reasoned about.
+Every claim mints a fresh random `worker_generation` token (not one token per worker
+process): `renew_lease`, `complete`, `fail`, and `mark_cancelled` all require the caller's
+token to still match the row, so a worker that loses its lease (or a stale worker resuming
+after what it thinks was a hiccup) can never mutate a job another attempt now owns.
+
+Cancellation has two paths tested explicitly: a still-`queued` job is cancelled immediately
+(never claimable), while a `running` job moves to `cancelling` and the worker itself
+transitions it to `cancelled` the next time it checks — because a worker cannot promise
+instantaneous cancellation while native Piper inference is in flight. A crashed worker is
+detected by comparing `lease_expires_at` against the current time; `recover_interrupted`
+requeues it up to `worker.max_automatic_recoveries` times before leaving it `interrupted` for
+an explicit retry. `create_retry` links a new job row to the old one (`previous_job_id`,
+`attempt + 1`) and only accepts a `failed`, `cancelled`, or `interrupted` source job. A
+partial unique index (`ux_jobs_active_synth`) additionally guarantees at most one active
+synthesize job per rendition at the database level, independent of any application check.
+
+## ADR-019: Durable audio publication commits to the database only after the file is proven valid
+
+**Status:** Accepted, 2026-09-12
+
+`storage/durable_audio.py`'s `LocalDurableAudioStore.stage` writes each chunk's WAV bytes to
+a temporary file beside its final location, flushes and `fsync`s it, closes it, re-opens and
+re-parses it with the standard library `wave` module to confirm its channel count, sample
+width, frame rate, and frame count match the synthesized `AudioResult` exactly, computes its
+SHA-256 from the bytes actually on disk, and only then `os.replace`s it to its final
+content-addressed name (`<ordinal>-<sha256>.wav`). No database row exists yet at this point,
+so a crash here can only ever leave an orphan file, never a row pointing at nothing.
+
+`db/repositories/audio.py`'s `publish_chunk` is the sole place a row is committed: inside one
+transaction it re-checks that the calling job still holds a `running`/`cancelling` state with
+a matching `worker_generation` and that `cancel_requested` is not set, *before* inserting the
+chunk row and bumping the rendition's `manifest_revision`. This closes the exact race the
+project plan calls out — a worker whose lease was reassigned, or whose job was cancelled
+between finishing synthesis and committing, cannot publish stale or unwanted audio. All three
+rejection paths (`duplicate`, `stale_generation`, `cancelled`) are exercised by real two-actor
+tests, and the worker's cancellation-during-publish path is exercised end to end in
+`tests/test_worker_loop.py`.
+
+## ADR-020: The durable worker runs as an in-process daemon thread, not a separate OS process
+
+**Status:** Accepted, 2026-09-12
+
+The project plan's architecture describes "one Python worker" as a separate process from the
+API, with a launcher that fences and stops an old worker before starting its replacement.
+Building genuine cross-platform process supervision (spawn without `fork`, a real
+inter-process fencing protocol beyond lease expiry, coordinated shutdown) is substantial
+independent work that this slice defers, matching the plan's own list of remaining facts to
+establish. Instead, `cli.py`'s `_run_serve` starts one dedicated non-daemon `WorkerLoop`
+thread inside the same OS process as the Uvicorn server, stops it via a `threading.Event` and
+joins it (bounded 30 seconds) in a `finally` block, and holds a new
+`storage/process_lock.InstanceLock` for the whole process lifetime so a second `serve`
+invocation against the same data directory is refused rather than silently running two
+workers.
+
+This still satisfies the concrete requirements that motivate the "separate process" framing:
+Piper synthesis and article fetching never occupy the API's asyncio event loop (they run on
+the dedicated thread), FastAPI `BackgroundTasks` are never used as the queue (SQLite is, via
+`WorkerLoop.run_forever`), and per-claim generation tokens make a stale attempt's writes
+rejected exactly as if it were a separate process that lost a lease. What it does *not* yet
+provide is fencing against two independent OS processes started against the same data
+directory from different terminals without going through `InstanceLock` (e.g., a hand-rolled
+script bypassing `serve`), or surviving an API-thread crash that takes the whole interpreter
+down with it. True multi-process supervision remains a candidate for later hardening if a
+single worker thread's blast radius (one unhandled exception can, in principle, affect the
+same process as the API) proves insufficient in practice.
+
+## ADR-021: Chunk synthesis timeout is enforced with a daemon thread, not a killable subprocess
+
+**Status:** Accepted, 2026-09-12
+
+The plan requires "a supervisor or bounded subprocess/watchdog" so a chunk timeout is
+effective "even if the inference call hangs." Python cannot forcibly terminate a thread, and
+`concurrent.futures.ThreadPoolExecutor` specifically is the wrong primitive here: its worker
+threads are joined by an `atexit` hook, so a hung call submitted through it would block
+interpreter shutdown indefinitely even after the caller gives up waiting. `worker/loop.py`'s
+`_run_with_timeout` instead runs the synthesis call on a plain `daemon=True` `threading.Thread`
+and joins it with a timeout; on expiry it raises `SynthesisTimeoutError`, fails the job with
+`SYNTHESIS_TIMEOUT`, and moves on to the next job. The daemon thread is deliberately abandoned
+running in the background rather than tracked further.
+
+This is a real, accepted limitation, not a full fix: the abandoned call keeps consuming a
+thread (and whatever CPU/memory Piper is using) until it naturally returns, and a genuinely
+hung native call would still block a *second* attempt at the same chunk if the worker loop
+ever tried to reuse that thread (it does not — each call gets its own thread). The documented
+recovery for a truly hung synthesis is the same as for any other worker fault: stop and
+restart the `serve` process; the durable job/lease model ensures no state is lost by doing so.
+A subprocess-per-chunk architecture would close this gap completely and is deferred pending
+evidence it is actually needed — real Piper synthesis measured roughly 24x faster than
+playback in M1/M2, and the M3 real-article smoke test (see `docs/STATUS.md`) synthesized
+three chunks of Serbian audio in about 6 seconds total.
+
+## ADR-022: Viewer identity is a lightweight opaque cookie, not the full session system
+
+**Status:** Accepted, 2026-09-12
+
+The project plan's `viewers`/`sessions` entity anticipates password-hashed LAN access codes,
+rate-limited session creation, and explicit revocation — all of that is still deferred to the
+LAN-hardening milestone, since `serve` continues to refuse `lan_mode`. M3 needs an ownership
+seam now (durable per-viewer readings, history, and progress) without pretending that
+security work is done. `api/app.py`'s `_resolve_viewer` issues a high-entropy
+`secrets.token_urlsafe(32)` cookie (`HttpOnly`, `SameSite=Lax`, no `Secure` flag since the
+server is plain HTTP loopback), stores only its SHA-256 hash via
+`SqliteViewerRepository.issue_token`, and creates a new `viewers` row on first sight. Every
+reading/job/rendition/progress lookup is scoped through this viewer id, and cross-viewer
+access is rejected as a plain 404 (verified in `tests/test_api.py`) rather than 403, so a
+guessed id does not confirm existence. There is intentionally no login, no revocation
+endpoint, and no rate limiting yet: those remain real gaps until LAN mode is implemented, at
+which point this same cookie mechanism is the natural seam to extend with an access code.
+
+## ADR-023: Rendition cache reuse is scoped to one article snapshot, not shared across readings
+
+**Status:** Accepted, 2026-09-12
+
+`application/services/rendition_contract.py` hashes the prepared segments' content digests,
+language/script, and the full voice/engine/model/config/settings identity into one
+`contract_hash`, unique per `(article_id, contract_hash)` at the database level. Within one
+reading, re-requesting the same voice returns the existing rendition (or, if it previously
+failed/was cancelled, links a new job to resume it) instead of resynthesizing — this is the
+plan's "reuse a matching ready rendition where valid." Resubmitting the *same URL* as a new
+reading, however, always creates a fresh article snapshot and a fresh rendition, matching the
+plan's explicit statement that "refresh is an explicit new submission/snapshot" and that
+cross-user (and, in this slice, cross-reading) cache deduplication is deferred. Implementing
+article-level dedup by (normalized URL, viewer) would risk silently serving stale content
+under a "not actually refreshed" URL and was judged not worth that risk for M3.
+
+## ADR-024: A Windows liveness check needs explicit `HANDLE` typing and an exit-code check
+
+**Status:** Accepted, 2026-09-12
+
+The real-article smoke test (see `docs/STATUS.md`) caught two live bugs in
+`storage/process_lock.py`'s stale-lock recovery that no synthetic-PID unit test had
+surfaced. First, `ctypes.windll.kernel32.OpenProcess` returns a pointer-sized `HANDLE` (8
+bytes on 64-bit Windows); without explicit `argtypes`/`restype` ctypes assumes a 32-bit
+`c_int` return and silently truncates it, which can misreport an exited, PID-recycled process
+as alive. Second, even with correct typing, `OpenProcess` can succeed against a process that
+has already exited but not yet been fully reaped by the OS (its kernel object persists until
+every handle to it closes) — a successful open is not proof the process is still *running*.
+`_process_is_alive` now declares exact `argtypes`/`restype` for `OpenProcess`, `CloseHandle`,
+and `GetExitCodeProcess`, and treats a process as alive only when `GetExitCodeProcess`
+reports `STILL_ACTIVE` (259). `tests/test_process_lock.py` regression-tests this by spawning
+and waiting on a real subprocess rather than relying on an arbitrary large PID, which is what
+let the original bug through.
+
 ## Open decisions
 
 - A verified authentic (non-Slovenian-derived) Serbian voice, if `sr-marko-medium` fails listening
   quality in future use or a better-provenance alternative becomes available.
-- SQLite migration and cross-platform supervisor/process-lock implementations.
-- Password hashing implementation and session lifetimes for LAN mode.
+- Cross-platform multi-*process* worker supervision (see ADR-020); the current single-process,
+  single-thread worker plus `InstanceLock` covers the durability and single-ownership
+  requirements but not fencing against a hand-rolled second process bypassing `serve`.
+- Audio cache eviction/LRU and disk-cap enforcement (project plan section 12) are not implemented;
+  M3 durable audio grows unbounded until a reading is explicitly deleted.
+- Password hashing implementation, access codes, and session lifetimes for LAN mode.
 - Application release license, after dependency and model licenses are known (see ADR-009 for the
   Lessac-lineage caveat on the German voice).

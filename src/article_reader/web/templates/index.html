@@ -16,7 +16,7 @@
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <span>Article Reader</span>
       </a>
-      <span class="local-badge"><span aria-hidden="true"></span> Local preview</span>
+      <span class="local-badge"><span aria-hidden="true"></span> Local, durable</span>
     </header>
 
     <main id="reader-main">
@@ -24,7 +24,8 @@
         <p class="eyebrow">Listen, don’t scroll</p>
         <h1 id="page-title">Turn an article into a calm listening session.</h1>
         <p class="lede">
-          Paste a public article link. The text and voice stay on this computer.
+          Paste a public article link. The text and voice stay on this computer, and your
+          reading survives closing this page or restarting the app.
         </p>
 
         <form id="article-form" class="article-form">
@@ -41,7 +42,7 @@
               required
             >
             <button id="fetch-button" class="primary-button" type="submit">
-              Fetch article
+              Read this article
             </button>
           </div>
 
@@ -67,6 +68,11 @@
         </form>
 
         <div id="status" class="status" role="status" aria-live="polite" hidden></div>
+
+        <section id="history-panel" class="history-panel" hidden>
+          <p class="eyebrow">Recent readings</p>
+          <ul id="history-list" class="history-list"></ul>
+        </section>
       </section>
 
       <section id="review-panel" class="workspace" aria-labelledby="article-title" hidden>
@@ -117,12 +123,18 @@
           <p id="player-position" class="player-position"></p>
         </div>
 
+        <p id="job-state" class="job-state" role="status" aria-live="polite"></p>
+
         <p id="current-segment" class="current-segment"></p>
         <audio id="audio-player" preload="metadata" controls></audio>
 
         <div class="player-controls">
           <button id="previous-button" class="icon-button" type="button">Previous section</button>
           <button id="next-button" class="icon-button" type="button">Next section</button>
+          <button id="cancel-button" class="icon-button danger-button" type="button" hidden>
+            Cancel
+          </button>
+          <button id="retry-button" class="icon-button" type="button" hidden>Retry</button>
           <label class="speed-control" for="playback-speed">
             Speed
             <select id="playback-speed">
@@ -138,7 +150,7 @@
 
     <footer>
       <p>Runs on this computer · Article Reader {{ app_version }}</p>
-      <p>Preview mode does not save history yet.</p>
+      <p>Reading history and playback position are saved on this computer.</p>
     </footer>
   </body>
 </html>

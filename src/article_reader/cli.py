@@ -11,6 +11,11 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from importlib import resources
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from article_reader.db.connection import Database
+    from article_reader.worker.loop import WorkerLoop
 
 from article_reader import __version__
 from article_reader.application.ports.speech import SpeechEngine
@@ -941,10 +946,48 @@ def _run_prepare_article(arguments: argparse.Namespace, settings: Settings) -> i
     return _EXIT_OK if result.status is ArticlePreparationStatus.READY else _EXIT_UNAVAILABLE
 
 
+def _worker_dependencies(
+    settings: Settings, registry: VoiceRegistry, database: Database
+) -> WorkerLoop:
+    from article_reader.db.repositories import (
+        SqliteArticleRepository,
+        SqliteAudioChunkRepository,
+        SqliteJobRepository,
+        SqliteReadingRepository,
+        SqliteRenditionRepository,
+    )
+    from article_reader.storage.durable_audio import LocalDurableAudioStore
+    from article_reader.worker.loop import WorkerLoop, WorkerSettings
+
+    model_store = ModelStore(settings.paths.models_dir)
+    audio_store = LocalDurableAudioStore(settings.paths.audio_dir / "renditions")
+    removed = audio_store.clear_stale_temporary_files()
+    if removed:
+        print(f"Removed {removed} stale temporary audio file(s) from a previous run.")
+
+    return WorkerLoop(
+        readings=SqliteReadingRepository(database),
+        articles=SqliteArticleRepository(database),
+        renditions=SqliteRenditionRepository(database),
+        audio_chunks=SqliteAudioChunkRepository(database),
+        jobs=SqliteJobRepository(database),
+        preparation_service=_article_preparation_service(settings),
+        voice_registry=registry,
+        engine_factory=lambda: PiperEngine(model_store),
+        audio_store=audio_store,
+        settings=WorkerSettings(
+            chunk_timeout_seconds=settings.speech.chunk_timeout_seconds,
+            heartbeat_seconds=settings.worker.heartbeat_seconds,
+            lease_seconds=settings.worker.lease_seconds,
+            max_automatic_recoveries=settings.worker.max_automatic_recoveries,
+        ),
+    )
+
+
 def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
     if settings.server.lan_mode:
         print(
-            "error: the preview UI is loopback-only until browser sessions and LAN access-code "
+            "error: the reader is loopback-only until browser sessions and LAN access-code "
             "protection are implemented.",
             file=sys.stderr,
         )
@@ -956,34 +999,61 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
     import uvicorn
 
     from article_reader.api.app import create_app
+    from article_reader.db.connection import Database
+    from article_reader.storage.process_lock import InstanceLock, InstanceLockError
 
-    registry = _packaged_registry()
-    app = create_app(settings, _article_preparation_service(settings), registry)
-    host = settings.server.bind
-    display_host = "localhost" if host in {"127.0.0.1", "::1"} else host
-    url = f"http://{display_host}:{settings.server.port}/"
-    print(f"Article Reader: {url}")
-    print("Press Ctrl+C to stop.")
+    ensure_runtime_dirs(settings)
+    lock = InstanceLock(settings.paths.data_dir / "instance.lock")
+    try:
+        lock.acquire()
+    except InstanceLockError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_UNAVAILABLE
 
-    if not arguments.no_open:
+    try:
+        database = Database(settings.paths.database_path)
+        registry = _packaged_registry()
+        app = create_app(settings, database, registry)
+        worker = _worker_dependencies(settings, registry, database)
 
-        def open_browser() -> None:
-            try:
-                webbrowser.open(url, new=2)
-            except OSError:
-                print(f"Could not open a browser automatically; open {url} manually.")
+        stop_event = threading.Event()
+        worker_thread = threading.Thread(
+            target=worker.run_forever, args=(stop_event,), name="article-reader-worker"
+        )
+        worker_thread.start()
 
-        timer = threading.Timer(0.8, open_browser)
-        timer.daemon = True
-        timer.start()
+        host = settings.server.bind
+        display_host = "localhost" if host in {"127.0.0.1", "::1"} else host
+        url = f"http://{display_host}:{settings.server.port}/"
+        print(f"Article Reader: {url}")
+        print("Press Ctrl+C to stop.")
 
-    uvicorn.run(
-        app,
-        host=host,
-        port=settings.server.port,
-        access_log=False,
-        log_level="info",
-    )
+        if not arguments.no_open:
+
+            def open_browser() -> None:
+                try:
+                    webbrowser.open(url, new=2)
+                except OSError:
+                    print(f"Could not open a browser automatically; open {url} manually.")
+
+            timer = threading.Timer(0.8, open_browser)
+            timer.daemon = True
+            timer.start()
+
+        try:
+            uvicorn.run(
+                app,
+                host=host,
+                port=settings.server.port,
+                access_log=False,
+                log_level="info",
+            )
+        finally:
+            stop_event.set()
+            worker_thread.join(timeout=30)
+            database.close()
+    finally:
+        lock.release()
     return _EXIT_OK
 
 

@@ -22,8 +22,10 @@ uv run --locked article-reader serve
 uv run --locked pytest -q
 ```
 
-The reader opens at `http://localhost:8765/`. It is loopback-only in this preview increment; do not
-change the bind address or enable LAN mode until the access-code/session milestone is implemented.
+The reader opens at `http://localhost:8765/`. `serve` also starts one durable background worker
+that persists jobs, reading history, and audio to SQLite under the data directory, so reading
+progress survives closing the page and restarting the app. It is loopback-only; do not change the
+bind address or enable LAN mode until the access-code/session milestone is implemented.
 
 For the inspected project workspace, all three approved models already live in
 `runtime/voice-data`. Launch that exact setup with:

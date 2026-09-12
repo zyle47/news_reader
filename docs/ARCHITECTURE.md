@@ -2,23 +2,26 @@
 
 ## Shape of the application
 
-Article Reader is a modular monolith with two runtime processes and one local data directory:
+Article Reader is a modular monolith. As of M3 it runs as one OS process containing an API/UI
+component and one durable worker thread, sharing one local data directory:
 
 ```text
-browser -> API/UI process -> SQLite + protected audio files
-                    worker -> fetch -> extract -> prepare text -> speech engine
+browser -> API (FastAPI, asyncio event loop) -> SQLite + protected audio files
+                    worker thread (durable loop) -> fetch -> extract -> prepare text -> speech engine
 ```
 
-The API process will authenticate viewers, validate requests, enqueue durable work, expose state,
-and serve authorized immutable audio. One worker will claim jobs from SQLite and perform bounded
-network, parsing, and CPU-heavy speech work. SQLite is authoritative; files are artifacts whose
-metadata and publication state live in the database.
+The API validates requests, reads/writes durable state through repositories, and serves authorized
+immutable audio resolved only through database metadata; it never fetches a URL or calls the speech
+engine itself. The worker thread claims jobs from SQLite one at a time in FIFO order and performs
+all bounded network, parsing, and CPU-heavy speech work, off the API's asyncio event loop. SQLite is
+authoritative; audio files are artifacts whose metadata and publication state live in the database.
+See `docs/DECISIONS.md` ADR-020 for why the worker is a thread within the API process rather than a
+separate OS process, and what that does and does not fence against.
 
 M0/M1 and M2 implement the framework-independent foundation, real speech, text preparation, and
-safe fetch/extraction adapters. A loopback-only FastAPI/Jinja preview adapter now proves the full
-browser interaction and real audio path. Persistence and worker supervision enter in M3; the
-preview adapter's synchronous renderer is replaced by those durable jobs without moving business
-logic into routes or JavaScript.
+safe fetch/extraction adapters. M3 replaces the transient loopback preview with a durable SQLite
+job queue, one background worker thread, and atomic audio publication; the browser reader now
+polls durable state and plays back progressively instead of waiting for a synchronous render.
 
 ## Dependency rule
 
@@ -40,7 +43,12 @@ speech / db / fetch / storage (outbound adapters) --+
 - `speech/`, `db/`, `fetch/`, `extract/`, `storage/`, and `text/` contain concrete outbound
   adapters. `text/` contains pure script/normalization/segmentation logic, a bounded local-file
   loader, and the isolated local py3langid adapter; it has no network or database dependency.
-- `api/`, `worker/`, and `cli.py` are inbound adapters. `cli.py` is the current composition root.
+  `db/` owns SQLite connections, migrations, and every repository; it is the only package
+  allowed to import `sqlite3`. `storage/durable_audio.py` and `storage/process_lock.py` are the
+  concrete durable-audio and single-instance adapters added in M3.
+- `api/`, `worker/`, and `cli.py` are inbound adapters. `cli.py` is the current composition root:
+  it is the only module that constructs both the FastAPI app (`api/app.py`) and the durable
+  worker (`worker/loop.py`) against the same shared `db.connection.Database`.
 - `resources/` contains versioned, non-secret metadata bundled with the application.
 
 Only a composition root may know both an application service and its concrete adapters. Domain and
@@ -68,16 +76,24 @@ empty abstraction layers:
    reports, safe voice installer, and a real Piper adapter behind the same port.
 2. M2: bounded public fetching, structured extraction/review, local language and script evidence,
    explicit override, original/display/speech separation, normalization, segmentation, and
-   block/span traceability are implemented. `prepare-article` is the current end-to-end preview
-   surface; awaiting-review/language states deliberately stop before speech preparation.
-3. Preview UI scaffold: loopback FastAPI/Jinja page, extracted-text review, language/voice choice,
-   atomic WAV chunks, range delivery, player controls, and transient same-browser resume. This is
-   implemented early at the owner's request so the real pipeline can be tested without the CLI.
-4. M3: migrations, repositories, durable jobs, worker, cancellation/recovery, and authenticated
-   ownership replace the preview's bounded in-memory/request-scoped execution.
-5. M4: progressive generation, durable resume/history, and real-phone/browser seam testing mature
-   the scaffold into the full browser reader.
-5. M5: sessions/LAN hardening, cleanup, and portable reading bundles.
+   block/span traceability are implemented.
+3. M3 (this milestone): `db/` (connection, migrations, eight repositories),
+   `application/ports/persistence.py` and `application/ports/durable_audio.py` (the protocols the
+   durable layer depends on), `application/services/reading_service.py` (durable orchestration for
+   the API side: submission, review/language resolution, rendition creation with contract-hash
+   reuse, cancel/retry, progress), `application/services/rendition_contract.py` and
+   `persistence_mapping.py`, `worker/loop.py` (the one durable worker), `storage/durable_audio.py`
+   (fsync-validate-rename publication), and `storage/process_lock.py` (single-instance enforcement)
+   replace the M2-era preview's bounded in-memory/request-scoped execution. `api/app.py` is
+   rewritten around these instead of the transient `_PreviewStore`. The browser reader is rewired
+   in place (`web/static/app.js`, `web/templates/index.html`) to poll durable job/rendition state,
+   play back progressively as chunks publish, and offer working cancel/retry — it is not a
+   separate scaffold-to-final rewrite, since the M2-era preview page's design and controls are
+   preserved.
+4. M4: real-phone/browser seam testing, and any progressive-playback UX refinement that real
+   devices surface (buffering feel, seek-ahead-of-generated messaging, resume-after-voice-change).
+5. M5: sessions/LAN hardening (access codes, rate limiting, revocation), audio cache
+   eviction/disk-cap enforcement, and portable reading bundles.
 
 This ordering keeps high-risk security and durability logic testable without requiring a large
 framework graph or a running neural model.

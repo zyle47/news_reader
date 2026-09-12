@@ -13,6 +13,7 @@ from article_reader.application.services.article_ingestion import (
     ArticleIngestionResult,
 )
 from article_reader.application.services.language_selection import select_language
+from article_reader.domain.article import ExtractedArticle
 from article_reader.domain.language import (
     LanguageDetection,
     LanguageSelection,
@@ -83,8 +84,8 @@ def _detection_text(result: ArticleIngestionResult) -> str:
     return sample[:_MAX_LANGUAGE_SAMPLE_CHARACTERS]
 
 
-def _source_text_and_mappings(
-    result: ArticleIngestionResult,
+def build_prepared_article(
+    article: ExtractedArticle,
     *,
     language: Language,
     script: Script,
@@ -92,7 +93,14 @@ def _source_text_and_mappings(
     review_accepted: bool,
     text_preparer: TextPreparer,
 ) -> PreparedArticle:
-    article = result.article
+    """Build source-traceable speech segments for one resolved article snapshot.
+
+    This depends only on the immutable ``ExtractedArticle`` and the resolved language/script,
+    never on the original fetch. Reviewing or overriding language for an already-persisted
+    article snapshot therefore never re-fetches the source: both the durable worker's initial
+    automatic pass and the API's manual review/override resolution call this same function.
+    """
+
     parts: list[str] = []
     title_span: SourceSpan | None = None
     mappings: list[ArticleBlockSourceSpan] = []
@@ -231,8 +239,8 @@ class ArticlePreparationService:
 
         assert selection.language is not None
         assert selection.script is not None
-        prepared_article = _source_text_and_mappings(
-            ingestion,
+        prepared_article = build_prepared_article(
+            ingestion.article,
             language=selection.language,
             script=selection.script,
             max_segment_characters=self._max_segment_characters,
@@ -254,4 +262,5 @@ __all__ = [
     "ArticlePreparationResult",
     "ArticlePreparationService",
     "ArticlePreparationStatus",
+    "build_prepared_article",
 ]
