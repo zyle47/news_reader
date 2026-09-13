@@ -20,7 +20,7 @@ from article_reader.application.services.diagnostics import (
     DiagnosticReport,
     DiagnosticStatus,
 )
-from article_reader.config import Settings
+from article_reader.config import ServerSettings, Settings
 from article_reader.domain.article import ArticleBlock, ArticleBlockKind, ExtractedArticle
 from article_reader.domain.language import LanguageCandidate, LanguageDetection
 from article_reader.domain.speech import Language, VoiceEvaluationStatus
@@ -683,3 +683,36 @@ def test_prepare_article_returns_unavailable_with_actionable_language_state(
     assert exit_code == 3
     assert "needs_language_override" in captured.out
     assert "--language en|de|sr" in captured.out
+
+
+def test_serve_bind_requires_explicit_lan_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code = cli.main(["serve", "--bind", "192.168.1.20", "--no-open"])
+
+    assert exit_code == 2
+    assert "requires explicit --lan" in capsys.readouterr().err
+
+
+def test_configured_lan_mode_still_requires_launch_opt_in(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    arguments = cli.build_parser().parse_args(["serve", "--no-open"])
+    settings = Settings(server=ServerSettings(bind="0.0.0.0", lan_mode=True))
+
+    assert cli._run_serve(arguments, settings) == 3
+    assert "requires explicit 'serve --lan'" in capsys.readouterr().err
+
+
+def test_ctrl_c_is_a_clean_successful_stop(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def interrupt(arguments: object, settings: object) -> int:
+        del arguments, settings
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_run_serve", interrupt)
+
+    assert cli.main(["serve", "--no-open"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "Article Reader stopped.\n"
+    assert captured.err == ""

@@ -13,7 +13,7 @@ from article_reader.api.app import create_app
 from article_reader.application.ports.fetch import FetchedPage
 from article_reader.application.services.article_ingestion import ArticleIngestionResult
 from article_reader.application.services.article_preparation import ArticlePreparationService
-from article_reader.config import PathsSettings, Settings, ensure_runtime_dirs
+from article_reader.config import PathsSettings, ServerSettings, Settings, ensure_runtime_dirs
 from article_reader.db.connection import Database
 from article_reader.db.repositories import (
     SqliteArticleRepository,
@@ -154,9 +154,15 @@ def _voice(voice_id: str = "fixture-en") -> VoiceSpec:
 
 
 def _client(
-    tmp_path: Path, *, article: ExtractedArticle | None = None
+    tmp_path: Path,
+    *,
+    article: ExtractedArticle | None = None,
+    settings: Settings | None = None,
+    lan_address: str | None = None,
+    base_url: str = _ORIGIN,
+    client_address: tuple[str, int] = ("testclient", 50_000),
 ) -> tuple[TestClient, WorkerLoop, _Ingestor]:
-    settings = Settings(paths=PathsSettings(data_dir=(tmp_path / "data").resolve()))
+    settings = settings or Settings(paths=PathsSettings(data_dir=(tmp_path / "data").resolve()))
     ensure_runtime_dirs(settings)
     database = Database(settings.paths.database_path)
     registry = VoiceRegistry((_voice(),))
@@ -170,8 +176,9 @@ def _client(
         installation_checker=lambda _voice_spec: True,
         audio_store=audio_store,
         web_directory=web_directory,
-        allowed_hosts=frozenset({_HOST}),
-        allowed_origins=frozenset({_ORIGIN}),
+        allowed_hosts=frozenset({_HOST}) if lan_address is None else None,
+        allowed_origins=frozenset({_ORIGIN}) if lan_address is None else None,
+        lan_address=lan_address,
     )
 
     ingestor = _Ingestor(article)
@@ -199,7 +206,7 @@ def _client(
             max_automatic_recoveries=1,
         ),
     )
-    return TestClient(app, base_url=_ORIGIN), worker, ingestor
+    return TestClient(app, base_url=base_url, client=client_address), worker, ingestor
 
 
 def _post(client: TestClient, path: str, document: dict[str, object]) -> Response:
@@ -475,3 +482,142 @@ def test_cross_viewer_cannot_see_another_browsers_reading(tmp_path: Path) -> Non
     other_client = TestClient(client.app, base_url=_ORIGIN)  # A fresh cookie jar = new viewer.
     response = other_client.get(f"/api/readings/{created['reading_id']}")
     assert response.status_code == 404
+
+
+def _lan_clients(tmp_path: Path) -> tuple[TestClient, TestClient, WorkerLoop]:
+    lan_address = "192.168.50.12"
+    settings = Settings(
+        paths=PathsSettings(data_dir=(tmp_path / "lan-data").resolve()),
+        server=ServerSettings(bind=lan_address, port=8765, lan_mode=True),
+    )
+    local, worker, _ingestor = _client(
+        tmp_path,
+        settings=settings,
+        lan_address=lan_address,
+        base_url="http://localhost:8765",
+        client_address=("127.0.0.1", 50_000),
+    )
+    remote = TestClient(
+        local.app,
+        base_url=f"http://{lan_address}:8765",
+        client=("192.168.50.44", 50_001),
+    )
+    return local, remote, worker
+
+
+def _pair_remote(local: TestClient, remote: TestClient) -> dict[str, Any]:
+    offer_response = local.post(
+        "/api/pairings", headers={"Origin": "http://localhost:8765"}, json={}
+    )
+    assert offer_response.status_code == 200
+    offer = _json(offer_response)
+    assert offer["pairing_url"].endswith(f"#pair={offer['code']}")
+    assert offer["qr_data_url"].startswith("data:image/svg+xml;base64,")
+    paired = remote.post(
+        "/api/pairings/redeem",
+        headers={"Origin": "http://192.168.50.12:8765"},
+        json={"code": offer["code"], "label": "Test phone"},
+    )
+    assert paired.status_code == 200
+    assert offer["code"] not in paired.headers.get("set-cookie", "")
+    return _json(paired)
+
+
+def test_lan_requires_pairing_and_keeps_public_surface_non_sensitive(tmp_path: Path) -> None:
+    local, remote, _worker = _lan_clients(tmp_path)
+
+    assert remote.get("/").status_code == 200
+    assert _json(remote.get("/api/auth"))["authenticated"] is False
+    assert remote.get("/api/meta").status_code == 200
+    assert remote.get("/api/voices").status_code == 401
+    assert remote.get("/api/readings").status_code == 401
+    assert remote.head(f"/api/audio/missing/0/{'a' * 64}.wav").status_code == 401
+    assert "access-control-allow-origin" not in remote.get("/api/meta").headers
+
+    local_auth = local.get("/api/auth")
+    assert _json(local_auth)["authenticated"] is True
+    assert _json(local_auth)["loopback"] is True
+    assert "samesite=strict" in local_auth.headers.get("set-cookie", "").lower()
+
+
+def test_lan_pairing_shares_library_progress_and_revocation_cuts_off_audio(
+    tmp_path: Path,
+) -> None:
+    local, remote, worker = _lan_clients(tmp_path)
+    local.get("/api/auth")
+    paired = _pair_remote(local, remote)
+
+    assert remote.get("/api/voices").status_code == 200
+    created = _json(
+        local.post(
+            "/api/readings",
+            headers={"Origin": "http://localhost:8765"},
+            json={"url": _URL, "language": "en"},
+        )
+    )
+    worker.run_once()
+    assert any(
+        item["reading_id"] == created["reading_id"]
+        for item in _json(remote.get("/api/readings"))["readings"]
+    )
+
+    rendition = _json(
+        remote.post(
+            f"/api/readings/{created['reading_id']}/renditions",
+            headers={"Origin": "http://192.168.50.12:8765"},
+            json={"voice_id": "fixture-en"},
+        )
+    )
+    worker.run_once()
+    manifest = _json(remote.get(f"/api/renditions/{rendition['rendition_id']}/manifest"))
+    audio_url = manifest["chunks"][0]["audio_url"]
+    assert remote.head(audio_url).status_code == 200
+    assert remote.get(audio_url, headers={"Range": "bytes=0-9"}).status_code == 206
+
+    saved = remote.put(
+        f"/api/readings/{created['reading_id']}/progress",
+        headers={"Origin": "http://192.168.50.12:8765"},
+        json={
+            "rendition_id": rendition["rendition_id"],
+            "chunk_ordinal": 0,
+            "offset_seconds": 2.0,
+            "speed": 1.25,
+            "revision": None,
+        },
+    )
+    assert saved.status_code == 200
+    assert (
+        _json(local.get(f"/api/readings/{created['reading_id']}"))["progress"]["offset_seconds"]
+        == 2.0
+    )
+
+    revoked = local.post(
+        f"/api/sessions/{paired['session_id']}/revoke",
+        headers={"Origin": "http://localhost:8765"},
+        json={},
+    )
+    assert revoked.status_code == 200
+    assert remote.get("/api/readings").status_code == 401
+    assert remote.get(audio_url).status_code == 401
+
+
+def test_lan_boundary_rejects_remote_pair_creation_wrong_origin_and_rebinding(
+    tmp_path: Path,
+) -> None:
+    local, remote, _worker = _lan_clients(tmp_path)
+    local.get("/api/auth")
+    _pair_remote(local, remote)
+
+    remote_offer = remote.post(
+        "/api/pairings", headers={"Origin": "http://192.168.50.12:8765"}, json={}
+    )
+    assert remote_offer.status_code == 403
+    wrong_origin = remote.post(
+        "/api/readings",
+        headers={"Origin": "https://attacker.example"},
+        json={"url": _URL, "language": "en"},
+    )
+    assert wrong_origin.status_code == 403
+    rebound = remote.get("/api/readings", headers={"Host": "attacker.example"})
+    assert rebound.status_code == 400
+    assert "frame-ancestors 'none'" in rebound.headers["content-security-policy"]

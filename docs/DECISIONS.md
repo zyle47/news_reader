@@ -431,6 +431,55 @@ reports `STILL_ACTIVE` (259). `tests/test_process_lock.py` regression-tests this
 and waiting on a real subprocess rather than relying on an arbitrary large PID, which is what
 let the original bug through.
 
+## ADR-025: LAN mode uses two explicit sockets and one-time pairing into durable sessions
+
+**Status:** Accepted, 2026-09-13
+
+Normal `serve` remains loopback-only. `serve --lan` discovers the private address selected by the
+OS default route (or validates an explicit `--bind`) and gives Uvicorn two pre-bound sockets:
+`127.0.0.1` and exactly one RFC1918/IPv6-ULA address. It never substitutes `0.0.0.0`, trusts
+forwarded headers, opens firewall/router rules, or accepts a public/link-local/reserved address.
+Every launch requires the CLI flag even when configuration contains `lan_mode = true`.
+
+Only a request arriving on loopback can create a pairing offer. Its random eight-digit code lives
+for five minutes as a SHA-256 digest in a bounded, locked in-process store, is compared in constant
+time, works once, and is rate-limited per source address. A restart intentionally invalidates all
+offers. The QR contains the phone URL with the one-time code in its fragment, so the code is not
+sent in the initial request, access log, or referrer. The browser removes the fragment before
+redeeming the code in an exact-origin JSON POST.
+
+Successful redemption issues a high-entropy opaque HttpOnly/SameSite=Strict cookie and stores only
+its SHA-256 in SQLite. Schema migration 2 turns the M3 `viewer_tokens` seam into expiring,
+labelled, individually revocable `viewer_sessions`; old loopback tokens migrate without losing
+their readings. Sessions survive restarts, while expiry/revocation is checked on every protected
+route including audio HEAD/Range requests. Pairing joins the phone to the initiating viewer, so the
+desktop and phone deliberately share history and revisioned progress. Reaching the bounded session
+limit requires explicit revocation rather than silently removing the desktop identity.
+
+The threat model is a trusted home LAN plus hostile webpages. Exact Host/Origin checks, closed
+CORS, JSON-only mutations, session ownership, response hardening headers, and no remote assets
+address browser-origin and DNS-rebinding attacks. Plain HTTP does not provide confidentiality or
+resist an on-path LAN attacker; the UI and launcher say so explicitly. Internet exposure, trusted
+local HTTPS, public tunnels, and router forwarding remain out of scope.
+
+## ADR-026: Mobile playback enhances the durable chunk controller without an offline layer
+
+**Status:** Accepted, 2026-09-13
+
+The existing persistent `<audio>` element remains authoritative. M4 adds responsive touch layouts,
+pending-section messaging, exponential reconnect polling, `keepalive` progress flushes, clean
+rendition switching, Media Session actions, and optional Screen Wake Lock while playing. Every
+optional browser API has a fallback. The insecure-LAN page cannot assume secure-context Web Crypto,
+so non-security client/idempotency identifiers use `randomUUID` only when available and fall back
+to `getRandomValues` or a non-security local identifier; authentication randomness remains wholly
+server-side through Python `secrets`.
+
+No service worker, offline promise, background/screen-off guarantee, concatenated WAV, or eager
+whole-article buffer is introduced. The browser still begins with the first published chunk and
+waits honestly at an unavailable next chunk. A real LAN-IP browser run caught and fixed the
+secure-context `crypto.randomUUID` assumption; only a physical-phone pilot can establish device
+audio transition and sleep behavior.
+
 ## Open decisions
 
 - A verified authentic (non-Slovenian-derived) Serbian voice, if `sr-marko-medium` fails listening
@@ -440,6 +489,7 @@ let the original bug through.
   requirements but not fencing against a hand-rolled second process bypassing `serve`.
 - Audio cache eviction/LRU and disk-cap enforcement (project plan section 12) are not implemented;
   M3 durable audio grows unbounded until a reading is explicitly deleted.
-- Password hashing implementation, access codes, and session lifetimes for LAN mode.
+- Whether a future internet-facing mode justifies trusted local HTTPS or a separately designed
+  authenticated deployment; current LAN HTTP is intentionally limited to trusted networks.
 - Application release license, after dependency and model licenses are known (see ADR-009 for the
   Lessac-lineage caveat on the German voice).

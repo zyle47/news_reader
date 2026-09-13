@@ -1,4 +1,23 @@
 const elements = {
+  appShell: document.querySelector("#app-shell"),
+  pairingPanel: document.querySelector("#pairing-panel"),
+  pairingForm: document.querySelector("#pairing-form"),
+  pairingCode: document.querySelector("#pairing-code"),
+  deviceLabel: document.querySelector("#device-label"),
+  pairButton: document.querySelector("#pair-button"),
+  pairingStatus: document.querySelector("#pairing-status"),
+  modeBadge: document.querySelector("#mode-badge"),
+  devicesButton: document.querySelector("#devices-button"),
+  logoutButton: document.querySelector("#logout-button"),
+  devicesPanel: document.querySelector("#devices-panel"),
+  closeDevicesButton: document.querySelector("#close-devices-button"),
+  createPairingButton: document.querySelector("#create-pairing-button"),
+  pairingOffer: document.querySelector("#pairing-offer"),
+  pairingQr: document.querySelector("#pairing-qr"),
+  pairingOfferCode: document.querySelector("#pairing-offer-code"),
+  pairingOfferLink: document.querySelector("#pairing-offer-link"),
+  pairingOfferExpiry: document.querySelector("#pairing-offer-expiry"),
+  sessionsList: document.querySelector("#sessions-list"),
   form: document.querySelector("#article-form"),
   url: document.querySelector("#article-url"),
   language: document.querySelector("#language"),
@@ -51,6 +70,10 @@ const state = {
   playbackGeneration: 0,
   playerInitialized: false,
   autoplayPending: false,
+  initialized: false,
+  auth: null,
+  connectionFailures: 0,
+  wakeLock: null,
 };
 
 const READING_POLL_MS = 1200;
@@ -69,7 +92,17 @@ const READING_ACTIVE_STATES = new Set(["queued", "preparing", "generating"]);
 const JOB_ACTIVE_STATES = new Set(["queued", "running", "cancelling", "interrupted"]);
 const JOB_RETRYABLE_STATES = new Set(["failed", "cancelled", "interrupted"]);
 
-const tabId = crypto.randomUUID();
+function randomClientId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+const tabId = randomClientId();
 const playbackChannel = "BroadcastChannel" in window
   ? new BroadcastChannel("article-reader-playback")
   : null;
@@ -84,18 +117,28 @@ if (playbackChannel) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: options.body ? { "Content-Type": "application/json", ...options.headers } : {
-      ...options.headers,
-    },
-  });
+  const method = (options.method || "GET").toUpperCase();
+  const mutating = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+  const requestOptions = { ...options, method };
+  if (mutating && requestOptions.body === undefined) requestOptions.body = "{}";
+  requestOptions.headers = mutating
+    ? { "Content-Type": "application/json", ...options.headers }
+    : { ...options.headers };
+  let response;
+  try {
+    response = await fetch(path, requestOptions);
+    state.connectionFailures = 0;
+  } catch {
+    state.connectionFailures += 1;
+    throw new Error("Connection lost. Reconnecting to the reader…");
+  }
   const contentType = response.headers.get("content-type") || "";
   const document_ = contentType.includes("application/json") ? await response.json() : null;
   if (!response.ok) {
     const error = new Error(document_?.error?.message || `Request failed (${response.status}).`);
     error.code = document_?.error?.code || null;
     error.status = response.status;
+    if (response.status === 401 && path !== "/api/pairings/redeem") showPairingScreen();
     throw error;
   }
   return document_;
@@ -111,6 +154,146 @@ function hideStatus() {
   elements.status.hidden = true;
   elements.status.classList.remove("error");
   elements.status.textContent = "";
+}
+
+function showPairingStatus(message, error = false) {
+  elements.pairingStatus.textContent = message;
+  elements.pairingStatus.classList.toggle("error", error);
+  elements.pairingStatus.hidden = false;
+}
+
+function showPairingScreen() {
+  elements.appShell.hidden = true;
+  elements.pairingPanel.hidden = false;
+  elements.devicesButton.hidden = true;
+  elements.logoutButton.hidden = true;
+  elements.modeBadge.lastChild.textContent = " Pairing required";
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const suppliedCode = fragment.get("pair");
+  if (suppliedCode && /^\d{8}$/.test(suppliedCode)) elements.pairingCode.value = suppliedCode;
+  if (window.location.hash) history.replaceState(null, "", `${location.pathname}${location.search}`);
+}
+
+async function initializeReader() {
+  if (state.initialized) return;
+  state.initialized = true;
+  updateScriptChoice();
+  try {
+    const response = await api("/api/voices");
+    state.voices = response.voices;
+  } catch (error) {
+    showStatus(`Could not inspect local voices: ${error.message}`, true);
+  }
+  await loadHistory();
+}
+
+async function showReader(auth) {
+  state.auth = auth;
+  elements.pairingPanel.hidden = true;
+  elements.appShell.hidden = false;
+  elements.modeBadge.lastChild.textContent = auth.lan_mode ? " Paired LAN" : " Local, durable";
+  elements.devicesButton.hidden = !(auth.lan_mode && auth.loopback);
+  elements.logoutButton.hidden = !(auth.lan_mode && !auth.loopback);
+  configureMediaSession();
+  await initializeReader();
+}
+
+async function pairDevice(event) {
+  event.preventDefault();
+  elements.pairButton.disabled = true;
+  showPairingStatus("Pairing this device…");
+  try {
+    await api("/api/pairings/redeem", {
+      method: "POST",
+      body: JSON.stringify({
+        code: elements.pairingCode.value.trim(),
+        label: elements.deviceLabel.value.trim() || "Paired device",
+      }),
+    });
+    const auth = await api("/api/auth");
+    showPairingStatus("Paired. Opening your library…");
+    await showReader(auth);
+  } catch (error) {
+    showPairingStatus(error.message, true);
+  } finally {
+    elements.pairButton.disabled = false;
+  }
+}
+
+function renderSessions(document_) {
+  const fragment = document.createDocumentFragment();
+  for (const session of document_.sessions) {
+    const item = document.createElement("li");
+    item.className = "session-item";
+    const details = document.createElement("div");
+    const label = document.createElement("strong");
+    label.textContent = session.label;
+    const seen = document.createElement("small");
+    seen.textContent = session.current
+      ? "This browser"
+      : `Last seen ${formatRelativeTime(session.last_seen_at)}`;
+    details.append(label, seen);
+    item.append(details);
+    if (!session.current) {
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "icon-button danger-button";
+      revoke.textContent = "Revoke";
+      revoke.addEventListener("click", async () => {
+        revoke.disabled = true;
+        try {
+          await api(`/api/sessions/${session.session_id}/revoke`, { method: "POST" });
+          await loadSessions();
+        } catch (error) {
+          showStatus(error.message, true);
+          revoke.disabled = false;
+        }
+      });
+      item.append(revoke);
+    }
+    fragment.append(item);
+  }
+  elements.sessionsList.replaceChildren(fragment);
+}
+
+async function loadSessions() {
+  try {
+    renderSessions(await api("/api/sessions"));
+  } catch (error) {
+    showStatus(error.message, true);
+  }
+}
+
+async function openDevices() {
+  elements.devicesPanel.hidden = false;
+  elements.devicesPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  await loadSessions();
+}
+
+async function createPairingOffer() {
+  elements.createPairingButton.disabled = true;
+  try {
+    const offer = await api("/api/pairings", { method: "POST" });
+    elements.pairingQr.src = offer.qr_data_url;
+    elements.pairingOfferCode.textContent = offer.code.replace(/(\d{4})(\d{4})/, "$1 $2");
+    elements.pairingOfferLink.href = offer.pairing_url;
+    elements.pairingOfferLink.textContent = offer.pairing_url.split("#", 1)[0];
+    elements.pairingOfferExpiry.textContent = `Expires ${new Date(offer.expires_at).toLocaleTimeString()}`;
+    elements.pairingOffer.hidden = false;
+  } catch (error) {
+    showStatus(error.message, true);
+  } finally {
+    elements.createPairingButton.disabled = false;
+  }
+}
+
+async function logout() {
+  try {
+    await api("/api/logout", { method: "POST" });
+  } finally {
+    state.initialized = false;
+    showPairingScreen();
+  }
 }
 
 function clearTimer(name) {
@@ -325,6 +508,7 @@ async function saveProgress(force = false) {
   try {
     const result = await api(`/api/readings/${state.readingId}/progress`, {
       method: "PUT",
+      keepalive: force,
       body: JSON.stringify({
         rendition_id: state.manifest.rendition_id,
         chunk_ordinal: state.chunkIndex,
@@ -356,6 +540,63 @@ function highlightBlocks(chunk) {
   }
 }
 
+function updateMediaSession(chunk) {
+  if (!("mediaSession" in navigator) || !("MediaMetadata" in window)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: state.reading?.title || state.reading?.article?.title || "Article Reader",
+    artist: `Section ${chunk.ordinal + 1} of ${state.manifest?.total_chunks || 1}`,
+    album: "Article Reader",
+  });
+}
+
+async function acquireWakeLock() {
+  if (!("wakeLock" in navigator) || state.wakeLock) return;
+  try {
+    state.wakeLock = await navigator.wakeLock.request("screen");
+    state.wakeLock.addEventListener("release", () => {
+      state.wakeLock = null;
+    });
+  } catch {
+    // Optional browser enhancement; playback must never depend on it.
+  }
+}
+
+async function releaseWakeLock() {
+  if (!state.wakeLock) return;
+  const lock = state.wakeLock;
+  state.wakeLock = null;
+  try {
+    await lock.release();
+  } catch {
+    // The browser may already have released it while the page was hidden.
+  }
+}
+
+function configureMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const actions = {
+    play: () => elements.audio.play(),
+    pause: () => elements.audio.pause(),
+    previoustrack: () => loadChunk(state.chunkIndex - 1, {}),
+    nexttrack: () => loadChunk(state.chunkIndex + 1, {}),
+    seekto: (details) => {
+      if (Number.isFinite(details.seekTime) && Number.isFinite(elements.audio.duration)) {
+        elements.audio.currentTime = Math.min(
+          elements.audio.duration,
+          Math.max(0, details.seekTime),
+        );
+      }
+    },
+  };
+  for (const [action, handler] of Object.entries(actions)) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      // Support differs across mobile browsers.
+    }
+  }
+}
+
 async function loadChunk(index, { autoplay = false, restoreTime = 0 } = {}) {
   const manifest = state.manifest;
   if (!manifest || index < 0 || index >= manifest.chunks.length) return;
@@ -371,6 +612,7 @@ async function loadChunk(index, { autoplay = false, restoreTime = 0 } = {}) {
   elements.previousButton.disabled = index === 0;
   elements.nextButton.disabled = index === manifest.total_chunks - 1;
   highlightBlocks(chunk);
+  updateMediaSession(chunk);
   if (restoreTime > 0) state.restoreTime = restoreTime;
   if (autoplay) {
     try {
@@ -385,6 +627,14 @@ async function loadChunk(index, { autoplay = false, restoreTime = 0 } = {}) {
 
 function renderManifest(manifest) {
   const previousManifest = state.manifest;
+  if (previousManifest && previousManifest.rendition_id !== manifest.rendition_id) {
+    elements.audio.pause();
+    elements.audio.removeAttribute("src");
+    elements.audio.load();
+    state.playerInitialized = false;
+    state.chunkIndex = 0;
+    state.playbackGeneration += 1;
+  }
   state.manifest = manifest;
   elements.playerPanel.hidden = false;
 
@@ -441,8 +691,9 @@ async function pollManifestOnce(renditionId, token) {
         MANIFEST_POLL_MS,
       );
     }
-  } catch {
+  } catch (error) {
     if (token !== state.manifestPollToken) return;
+    showStatus(error.message || "Connection lost. Reconnecting…");
     state.manifestPollHandle = setTimeout(
       () => pollManifestOnce(renditionId, token),
       MANIFEST_POLL_MS,
@@ -465,7 +716,11 @@ async function pollReadingOnce() {
     state.reading = reading;
     renderReadingDocument(reading);
   } catch (error) {
-    showStatus(error.message, true);
+    showStatus(error.message, state.connectionFailures === 0);
+    state.readingPollHandle = setTimeout(
+      pollReadingOnce,
+      Math.min(10_000, READING_POLL_MS * (2 ** Math.min(state.connectionFailures, 3))),
+    );
     return;
   }
   const reading = state.reading;
@@ -529,7 +784,7 @@ async function submitReading(event) {
     const choices = currentLanguageRequest();
     const result = await api("/api/readings", {
       method: "POST",
-      headers: { "Idempotency-Key": crypto.randomUUID() },
+      headers: { "Idempotency-Key": randomClientId() },
       body: JSON.stringify({ url: elements.url.value.trim(), ...choices }),
     });
     await openReading(result.reading_id);
@@ -673,6 +928,13 @@ async function loadHistory() {
 }
 
 elements.form.addEventListener("submit", submitReading);
+elements.pairingForm.addEventListener("submit", pairDevice);
+elements.devicesButton.addEventListener("click", openDevices);
+elements.closeDevicesButton.addEventListener("click", () => {
+  elements.devicesPanel.hidden = true;
+});
+elements.createPairingButton.addEventListener("click", createPairingOffer);
+elements.logoutButton.addEventListener("click", logout);
 elements.language.addEventListener("change", updateScriptChoice);
 elements.resolveButton.addEventListener("click", resolveReading);
 elements.generateButton.addEventListener("click", generateAudio);
@@ -682,6 +944,11 @@ elements.previousButton.addEventListener("click", () => {
   loadChunk(state.chunkIndex - 1, {});
 });
 elements.nextButton.addEventListener("click", () => {
+  const next = state.manifest?.chunks[state.chunkIndex + 1];
+  if (next && next.state !== "ready") {
+    showStatus("That section is still generating. Playback will continue when it is ready.");
+    return;
+  }
   loadChunk(state.chunkIndex + 1, {});
 });
 elements.speed.addEventListener("change", () => {
@@ -692,8 +959,12 @@ elements.speed.addEventListener("change", () => {
 });
 elements.audio.addEventListener("play", () => {
   playbackChannel?.postMessage({ type: "playing", tabId });
+  acquireWakeLock();
 });
-elements.audio.addEventListener("pause", () => saveProgress(true));
+elements.audio.addEventListener("pause", () => {
+  releaseWakeLock();
+  saveProgress(true);
+});
 elements.audio.addEventListener("timeupdate", () => saveProgress(false));
 elements.audio.addEventListener("loadedmetadata", () => {
   if (state.restoreTime > 0 && state.restoreTime < elements.audio.duration) {
@@ -714,16 +985,27 @@ elements.audio.addEventListener("ended", async () => {
   }
 });
 window.addEventListener("beforeunload", () => saveProgress(true));
+window.addEventListener("offline", () => showStatus("Wi-Fi connection lost. Reconnecting…"));
+window.addEventListener("online", () => {
+  showStatus("Connection restored.");
+  if (state.readingId) startReadingPolling();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !elements.audio.paused) acquireWakeLock();
+});
 
 async function initialize() {
-  updateScriptChoice();
   try {
-    const response = await api("/api/voices");
-    state.voices = response.voices;
+    const auth = await api("/api/auth");
+    if (auth.authenticated) {
+      await showReader(auth);
+    } else {
+      showPairingScreen();
+    }
   } catch (error) {
-    showStatus(`Could not inspect local voices: ${error.message}`, true);
+    showPairingScreen();
+    showPairingStatus(error.message, true);
   }
-  await loadHistory();
 }
 
 initialize();

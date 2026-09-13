@@ -16,10 +16,66 @@
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <span>Article Reader</span>
       </a>
-      <span class="local-badge"><span aria-hidden="true"></span> Local, durable</span>
+      <div class="header-actions">
+        <span id="mode-badge" class="local-badge"><span aria-hidden="true"></span> Local, durable</span>
+        <button id="devices-button" class="header-button" type="button" hidden>Devices</button>
+        <button id="logout-button" class="header-button" type="button" hidden>Disconnect</button>
+      </div>
     </header>
 
     <main id="reader-main">
+      <section id="pairing-panel" class="pairing-panel" aria-labelledby="pairing-title" hidden>
+        <p class="eyebrow">Private local reader</p>
+        <h1 id="pairing-title">Pair this device</h1>
+        <p>
+          On the computer running Article Reader, open <strong>Devices</strong> and create a
+          one-time code. LAN traffic stays local, but plain HTTP is not encrypted.
+        </p>
+        <form id="pairing-form" class="pairing-form">
+          <label for="pairing-code">8-digit pairing code</label>
+          <input
+            id="pairing-code"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            pattern="[0-9]{8}"
+            maxlength="8"
+            required
+          >
+          <label for="device-label">Device name</label>
+          <input id="device-label" maxlength="40" value="My phone">
+          <button id="pair-button" class="primary-button" type="submit">Pair securely</button>
+        </form>
+        <p id="pairing-status" class="status" role="status" aria-live="polite" hidden></p>
+      </section>
+
+      <div id="app-shell" hidden>
+      <section id="devices-panel" class="devices-panel" aria-labelledby="devices-title" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">LAN access</p>
+            <h2 id="devices-title">Paired devices</h2>
+          </div>
+          <button id="close-devices-button" class="icon-button" type="button">Close</button>
+        </div>
+        <p>
+          Create a short-lived code here, then enter it on your phone. Codes work once and expire
+          after five minutes.
+        </p>
+        <button id="create-pairing-button" class="secondary-button" type="button">
+          Create pairing code
+        </button>
+        <div id="pairing-offer" class="pairing-offer" hidden>
+          <img id="pairing-qr" alt="QR code containing the one-time phone pairing address">
+          <div>
+            <span>One-time code</span>
+            <strong id="pairing-offer-code"></strong>
+            <a id="pairing-offer-link" target="_blank" rel="noreferrer">Open phone address</a>
+            <small id="pairing-offer-expiry"></small>
+          </div>
+        </div>
+        <ul id="sessions-list" class="sessions-list"></ul>
+      </section>
+
       <section class="hero" aria-labelledby="page-title">
         <p class="eyebrow">Listen, don’t scroll</p>
         <h1 id="page-title">Turn an article into a calm listening session.</h1>
@@ -146,6 +202,7 @@
           </label>
         </div>
       </section>
+      </div>
     </main>
 
     <footer>

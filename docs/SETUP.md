@@ -24,8 +24,7 @@ uv run --locked pytest -q
 
 The reader opens at `http://localhost:8765/`. `serve` also starts one durable background worker
 that persists jobs, reading history, and audio to SQLite under the data directory, so reading
-progress survives closing the page and restarting the app. It is loopback-only; do not change the
-bind address or enable LAN mode until the access-code/session milestone is implemented.
+progress survives closing the page and restarting the app. Normal startup is always loopback-only.
 
 For the inspected project workspace, all three approved models already live in
 `runtime/voice-data`. Launch that exact setup with:
@@ -41,6 +40,38 @@ For normal use on this Windows workspace, double-click `start-reader.cmd` instea
 the command. It prefers the verified CPython 3.12 environment, detects the existing
 `runtime/voice-data` models, and opens the reader automatically. Its server window must remain open
 while the page is in use.
+
+## Phone access on trusted Wi-Fi
+
+LAN access is explicit on every launch. Double-click `start-reader-lan.cmd` and confirm its warning,
+or run:
+
+```powershell
+.\runtime\venv312\Scripts\python.exe -m article_reader --data-dir runtime\voice-data serve --lan
+```
+
+The launcher selects the private address used by the default route, prints both the desktop and
+phone URLs, and listens only on `127.0.0.1` plus that one private address. If auto-detection chooses
+the wrong adapter (for example, a VPN or virtual switch), restart with an address shown by
+`ipconfig`:
+
+```powershell
+.\runtime\venv312\Scripts\python.exe -m article_reader --data-dir runtime\voice-data serve --lan --bind 192.168.0.12
+```
+
+Open the desktop URL first, choose **Devices**, then scan the QR code or enter the eight-digit code
+on the phone page. A code expires after five minutes and works once. Paired sessions survive an app
+restart for 30 days by default; the desktop Devices panel lists and revokes them. Disconnect on the
+phone revokes its current session. Stopping the server removes LAN exposure immediately.
+
+Windows may show a firewall prompt the first time. Permit the private network only if you want
+phone access; never enable public-network access or router port forwarding. Both devices must be on
+the same non-isolated Wi-Fi. VPN routing, guest Wi-Fi isolation, a changed DHCP address, or a
+sleeping host can prevent connection.
+
+LAN mode is HTTP, not HTTPS. Authentication blocks unpaired application use, Host/Origin checks
+block common browser attacks, and no permissive CORS is enabled, but traffic is not confidential
+against local-network sniffing. Use only a trusted private network.
 
 ## POSIX shell (not yet tested)
 

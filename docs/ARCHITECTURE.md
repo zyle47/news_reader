@@ -2,11 +2,13 @@
 
 ## Shape of the application
 
-Article Reader is a modular monolith. As of M3 it runs as one OS process containing an API/UI
+Article Reader is a modular monolith. As of M4 it runs as one OS process containing an API/UI
 component and one durable worker thread, sharing one local data directory:
 
 ```text
-browser -> API (FastAPI, asyncio event loop) -> SQLite + protected audio files
+desktop loopback socket ─┐
+                         ├─> API (FastAPI) -> authenticated SQLite state + protected audio
+private LAN socket ──────┘
                     worker thread (durable loop) -> fetch -> extract -> prepare text -> speech engine
 ```
 
@@ -22,6 +24,9 @@ M0/M1 and M2 implement the framework-independent foundation, real speech, text p
 safe fetch/extraction adapters. M3 replaces the transient loopback preview with a durable SQLite
 job queue, one background worker thread, and atomic audio publication; the browser reader now
 polls durable state and plays back progressively instead of waiting for a synchronous render.
+M4 adds explicit private-interface serving, short-lived one-time pairing, durable revocable
+sessions, exact Host/Origin enforcement for both sockets, and the responsive mobile/player seam.
+The loopback socket is the only place a browser identity may be bootstrapped without pairing.
 
 ## Dependency rule
 
@@ -46,6 +51,10 @@ speech / db / fetch / storage (outbound adapters) --+
   `db/` owns SQLite connections, migrations, and every repository; it is the only package
   allowed to import `sqlite3`. `storage/durable_audio.py` and `storage/process_lock.py` are the
   concrete durable-audio and single-instance adapters added in M3.
+- `network.py` discovers/selects RFC1918 or IPv6 ULA addresses without an external discovery
+  service. `security/pairing_qr.py` is the only QR renderer. The application-owned
+  `application/services/access_control.py` contains pairing/session/rate-limit policy and depends
+  only on the extended `ViewerRepository` port.
 - `api/`, `worker/`, and `cli.py` are inbound adapters. `cli.py` is the current composition root:
   it is the only module that constructs both the FastAPI app (`api/app.py`) and the durable
   worker (`worker/loop.py`) against the same shared `db.connection.Database`.
@@ -90,10 +99,12 @@ empty abstraction layers:
    play back progressively as chunks publish, and offer working cancel/retry — it is not a
    separate scaffold-to-final rewrite, since the M2-era preview page's design and controls are
    preserved.
-4. M4: real-phone/browser seam testing, and any progressive-playback UX refinement that real
-   devices surface (buffering feel, seek-ahead-of-generated messaging, resume-after-voice-change).
-5. M5: sessions/LAN hardening (access codes, rate limiting, revocation), audio cache
-   eviction/disk-cap enforcement, and portable reading bundles.
+4. M4 (this milestone): responsive mobile UI, Media Session/Wake Lock enhancement, reconnect and
+   voice-change recovery, explicit dual-socket LAN serving, QR/code pairing, durable session
+   expiry/revocation, rate limiting, and authenticated progress/audio delivery. A real desktop
+   browser completed the LAN pairing path; physical-phone playback remains an owner checklist.
+5. M5: audio cache eviction/disk-cap enforcement, playback leases, portable reading bundles, and
+   the PC B/physical-phone pilot.
 
 This ordering keeps high-risk security and durability logic testable without requiring a large
 framework graph or a running neural model.

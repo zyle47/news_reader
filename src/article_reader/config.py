@@ -18,6 +18,8 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Final, Literal
 
+from article_reader.network import is_private_lan_address
+
 ENV_PREFIX: Final = "ARTICLE_READER_"
 _DNS_LABEL: Final = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _WINDOWS_REMOTE_DRIVE: Final = 4
@@ -197,6 +199,61 @@ class ServerSettings:
                 "server.bind must be loopback unless server.lan_mode is true; "
                 "use 127.0.0.1 or ::1 for local-only operation"
             )
+        if (
+            self.lan_mode
+            and not loopback
+            and not wildcard
+            and not is_private_lan_address(self.bind)
+        ):
+            raise ConfigError(
+                "server.bind in LAN mode must be loopback, an unspecified auto-bind marker, "
+                "or a private RFC1918/ULA address"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class AccessSettings:
+    session_lifetime_hours: int = 720
+    pairing_lifetime_seconds: int = 300
+    max_sessions_per_viewer: int = 8
+    max_pairing_attempts: int = 5
+    pairing_attempt_window_seconds: int = 60
+    pairing_block_seconds: int = 60
+
+    def __post_init__(self) -> None:
+        _require_int(
+            "access.session_lifetime_hours",
+            self.session_lifetime_hours,
+            minimum=1,
+            maximum=8_760,
+        )
+        _require_int(
+            "access.pairing_lifetime_seconds",
+            self.pairing_lifetime_seconds,
+            minimum=30,
+            maximum=3_600,
+        )
+        _require_int(
+            "access.max_sessions_per_viewer",
+            self.max_sessions_per_viewer,
+            minimum=1,
+            maximum=64,
+        )
+        _require_int(
+            "access.max_pairing_attempts", self.max_pairing_attempts, minimum=1, maximum=100
+        )
+        _require_int(
+            "access.pairing_attempt_window_seconds",
+            self.pairing_attempt_window_seconds,
+            minimum=1,
+            maximum=3_600,
+        )
+        _require_int(
+            "access.pairing_block_seconds",
+            self.pairing_block_seconds,
+            minimum=1,
+            maximum=86_400,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +446,7 @@ class HistorySettings:
 class Settings:
     paths: PathsSettings = field(default_factory=PathsSettings)
     server: ServerSettings = field(default_factory=ServerSettings)
+    access: AccessSettings = field(default_factory=AccessSettings)
     worker: WorkerSettings = field(default_factory=WorkerSettings)
     fetch: FetchSettings = field(default_factory=FetchSettings)
     speech: SpeechSettings = field(default_factory=SpeechSettings)
@@ -399,6 +457,7 @@ class Settings:
         expected = (
             ("paths", self.paths, PathsSettings),
             ("server", self.server, ServerSettings),
+            ("access", self.access, AccessSettings),
             ("worker", self.worker, WorkerSettings),
             ("fetch", self.fetch, FetchSettings),
             ("speech", self.speech, SpeechSettings),
@@ -459,6 +518,12 @@ _FIELD_KINDS: Final[dict[SettingPath, SettingKind]] = {
     ("server", "bind"): "str",
     ("server", "port"): "int",
     ("server", "lan_mode"): "bool",
+    ("access", "session_lifetime_hours"): "int",
+    ("access", "pairing_lifetime_seconds"): "int",
+    ("access", "max_sessions_per_viewer"): "int",
+    ("access", "max_pairing_attempts"): "int",
+    ("access", "pairing_attempt_window_seconds"): "int",
+    ("access", "pairing_block_seconds"): "int",
     ("worker", "processes"): "int",
     ("worker", "tts_threads"): "int",
     ("worker", "resident_models"): "int",
@@ -674,6 +739,16 @@ def _build_settings(values: Mapping[SettingPath, object]) -> Settings:
             port=_value(values, "server", "port", int),
             lan_mode=_value(values, "server", "lan_mode", bool),
         ),
+        access=AccessSettings(
+            session_lifetime_hours=_value(values, "access", "session_lifetime_hours", int),
+            pairing_lifetime_seconds=_value(values, "access", "pairing_lifetime_seconds", int),
+            max_sessions_per_viewer=_value(values, "access", "max_sessions_per_viewer", int),
+            max_pairing_attempts=_value(values, "access", "max_pairing_attempts", int),
+            pairing_attempt_window_seconds=_value(
+                values, "access", "pairing_attempt_window_seconds", int
+            ),
+            pairing_block_seconds=_value(values, "access", "pairing_block_seconds", int),
+        ),
         worker=WorkerSettings(
             processes=_value(values, "worker", "processes", int),
             tts_threads=_value(values, "worker", "tts_threads", int),
@@ -773,6 +848,7 @@ def ensure_runtime_dirs(settings: Settings | PathsSettings) -> PathsSettings:
 
 
 __all__ = [
+    "AccessSettings",
     "CacheSettings",
     "ConfigError",
     "FetchSettings",

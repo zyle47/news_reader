@@ -133,6 +133,23 @@ audio:focus-visible {
   box-shadow: 0 0 0 3px rgb(47 157 117 / 15%);
 }
 
+.header-actions {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.header-button {
+  min-height: 2.35rem;
+  padding: 0.35rem 0.7rem;
+  color: var(--accent-dark);
+  font-size: 0.78rem;
+  font-weight: 750;
+  background: rgb(255 255 255 / 55%);
+  border: 1px solid rgb(23 107 85 / 24%);
+  border-radius: 99rem;
+}
+
 main {
   width: min(960px, calc(100% - 2rem));
   margin: 0 auto;
@@ -196,6 +213,8 @@ label {
 }
 
 input[type="url"],
+input[type="text"],
+input[inputmode="numeric"],
 select {
   min-width: 0;
   min-height: 3rem;
@@ -204,6 +223,123 @@ select {
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 0.65rem;
+}
+
+.pairing-panel,
+.devices-panel {
+  max-width: 680px;
+  margin: clamp(2rem, 8vw, 6rem) auto;
+  padding: clamp(1.25rem, 5vw, 2.5rem);
+  background: rgb(255 255 255 / 82%);
+  border: 1px solid rgb(255 255 255 / 92%);
+  border-radius: 1.2rem;
+  box-shadow: var(--shadow);
+}
+
+.pairing-panel h1,
+.devices-panel h2 {
+  margin: 0;
+  font-size: clamp(2rem, 7vw, 3.8rem);
+  line-height: 1;
+}
+
+.pairing-panel > p,
+.devices-panel > p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.pairing-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.55rem;
+  align-items: end;
+  margin-top: 1.4rem;
+}
+
+.pairing-form label {
+  grid-row: 1;
+}
+
+.pairing-form input,
+.pairing-form button {
+  grid-row: 2;
+  min-width: 0;
+  min-height: 3rem;
+}
+
+.pairing-form input {
+  padding: 0.7rem 0.85rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+}
+
+#pairing-code,
+#pairing-offer-code {
+  font-size: 1.25rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.12em;
+}
+
+.panel-heading,
+.session-item {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pairing-offer {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: 0.35rem;
+  align-items: center;
+  margin: 1rem 0;
+  padding: 1rem;
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+  border-radius: 0.8rem;
+}
+
+.pairing-offer img {
+  width: 100%;
+  padding: 0.35rem;
+  background: white;
+  border-radius: 0.45rem;
+}
+
+.pairing-offer div {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.pairing-offer strong {
+  font-size: 2rem;
+}
+
+.sessions-list {
+  display: grid;
+  gap: 0.6rem;
+  margin: 1.2rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.session-item {
+  padding: 0.8rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+}
+
+.session-item div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.session-item small {
+  color: var(--muted);
 }
 
 input[type="url"] {
@@ -591,6 +727,38 @@ footer p {
     padding-top: 2.8rem;
   }
 
+  .site-header {
+    align-items: flex-start;
+  }
+
+  .header-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .local-badge {
+    display: none;
+  }
+
+  .pairing-panel,
+  .devices-panel {
+    margin: 1.5rem auto;
+  }
+
+  .pairing-form {
+    grid-template-columns: 1fr;
+  }
+
+  .pairing-offer {
+    grid-template-columns: 7rem 1fr;
+  }
+
+  .pairing-form label,
+  .pairing-form input,
+  .pairing-form button {
+    grid-row: auto;
+  }
+
   .url-row,
   .options-row {
     display: grid;
@@ -620,6 +788,8 @@ footer p {
   .player-shell {
     bottom: 0.4rem;
     padding: 1rem;
+    max-height: calc(100vh - 0.8rem);
+    overflow-y: auto;
   }
 
   .player-controls {

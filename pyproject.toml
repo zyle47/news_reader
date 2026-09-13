@@ -13,6 +13,7 @@ dependencies = [
     "jinja2>=3.1.6,<4",
     "piper-tts>=1.8.0,<1.9",
     "py3langid>=0.4.0,<0.5",
+    "segno>=1.6.6,<2",
     "trafilatura>=2.2.0,<2.3",
     "urllib3>=2.7.0,<3",
     "uvicorn>=0.52.4,<0.53",
@@ -56,6 +57,7 @@ line-ending = "lf"
 source-include = [
     ".python-version",
     "start-reader.cmd",
+    "start-reader-lan.cmd",
     "article-reader-project-plan.md",
     "config.example.toml",
     "docs/**",

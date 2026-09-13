@@ -66,6 +66,20 @@ class ViewerRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ViewerSessionRecord:
+    """A revocable browser session; only ``token_hash`` is persisted."""
+
+    session_id: str
+    viewer_id: str
+    label: str
+    token_hash: str
+    created_at: str
+    last_seen_at: str
+    expires_at: str
+    revoked_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ReadingRecord:
     reading_id: str
     viewer_id: str
@@ -210,9 +224,15 @@ class ProgressRecord:
 class ViewerRepository(Protocol):
     def create(self, viewer: ViewerRecord) -> None: ...
 
-    def issue_token(self, viewer_id: str, token_hash: str, created_at: str) -> None: ...
+    def create_session(self, session: ViewerSessionRecord) -> None: ...
 
-    def find_viewer_id_by_token(self, token_hash: str) -> str | None: ...
+    def find_session_by_token(self, token_hash: str, *, now: str) -> ViewerSessionRecord | None: ...
+
+    def list_sessions(self, viewer_id: str, *, now: str) -> tuple[ViewerSessionRecord, ...]: ...
+
+    def touch_session(self, session_id: str, *, seen_at: str) -> None: ...
+
+    def revoke_session(self, viewer_id: str, session_id: str, *, revoked_at: str) -> bool: ...
 
 
 class ReadingRepository(Protocol):
@@ -379,4 +399,5 @@ __all__ = [
     "RenditionState",
     "ViewerRecord",
     "ViewerRepository",
+    "ViewerSessionRecord",
 ]

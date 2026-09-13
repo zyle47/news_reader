@@ -9,7 +9,7 @@ import pytest
 
 from article_reader.db.connection import Database
 from article_reader.db.errors import IncompatibleSchemaError
-from article_reader.db.migrations import CURRENT_SCHEMA_VERSION
+from article_reader.db.migrations import CURRENT_SCHEMA_VERSION, MIGRATIONS
 
 
 def test_fresh_database_applies_all_migrations(tmp_path: Path) -> None:
@@ -104,3 +104,39 @@ def test_restart_persists_committed_data(tmp_path: Path) -> None:
     with second.read() as connection:
         row = connection.execute("SELECT label FROM viewers WHERE viewer_id = 'v1'").fetchone()
     assert row["label"] == "Browser"
+
+
+def test_m3_database_migrates_legacy_viewer_tokens_to_expiring_sessions(tmp_path: Path) -> None:
+    path = tmp_path / "m3.sqlite3"
+    connection = sqlite3.connect(str(path))
+    try:
+        for statement in MIGRATIONS[0][2]:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO viewers (viewer_id, label, created_at) VALUES (?, ?, ?)",
+            ("viewer-1", "Existing browser", "2026-09-12T10:00:00+00:00"),
+        )
+        connection.execute(
+            "INSERT INTO viewer_tokens (token_hash, viewer_id, created_at) VALUES (?, ?, ?)",
+            ("a" * 64, "viewer-1", "2026-09-12T10:00:00+00:00"),
+        )
+        connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    finally:
+        connection.close()
+
+    database = Database(path)
+    with database.read() as migrated:
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == CURRENT_SCHEMA_VERSION
+        assert (
+            migrated.execute(
+                "SELECT COUNT(*) FROM viewer_sessions WHERE viewer_id = 'viewer-1'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            migrated.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'viewer_tokens'"
+            ).fetchone()[0]
+            == 0
+        )

@@ -4,15 +4,12 @@ Article Reader is a local-first application that extracts useful article text an
 in Serbian, English, or German. The project is being implemented incrementally from
 [`article-reader-project-plan.md`](article-reader-project-plan.md).
 
-The current increment adds durable jobs and audio to the architecture, diagnostics, three approved
-local Piper voices, text preparation, and the security-hardened public-HTTP(S) article
-fetch/extraction pipeline built in M0–M2. The fluent project owner approved the English, German,
-and Serbian voices for personal article reading after short and sustained listening. Article
-submission, review/language resolution, and audio generation now run as durable SQLite-backed jobs
-executed by one background worker: a URL submission returns immediately, the browser polls job and
-rendition state, and playback starts as soon as the first audio chunk is ready — before the rest of
-the article finishes generating. Reading history and playback position survive closing the page or
-restarting the app. LAN access and portable reading bundles remain later milestones.
+The current M4 build has the complete local reading path: security-hardened public-HTTP(S)
+extraction, approved local Piper voices, durable SQLite jobs/audio/history/progress, progressive
+playback, and an optional paired-phone mode. Normal startup remains loopback-only. Explicit LAN
+startup listens on loopback plus one selected private interface, and every reading/job/audio route
+requires a revocable browser session. A phone joins the desktop library through a five-minute,
+single-use code or QR link; raw session tokens are never stored or placed in URLs.
 
 ## Development setup
 
@@ -32,8 +29,19 @@ article URL; the page queues it, polls until extraction finishes, then walks thr
 language resolution when needed. Choose a voice to queue audio generation — playback starts on the
 first ready section instead of waiting for the whole article, and you can cancel or retry while it
 generates. The reader keeps section navigation, 0.75x-1.5x speed, cross-tab playback coordination,
-a recent-readings history list, and now persists playback position and history across restarts. It
-is intentionally available only from this computer until LAN authentication is implemented.
+a recent-readings history list, and persists playback position and history across restarts. It is
+available only from this computer unless LAN mode is deliberately enabled.
+
+To listen from a phone on the same trusted Wi-Fi, double-click **`start-reader-lan.cmd`**, or run:
+
+```powershell
+.\runtime\venv312\Scripts\python.exe -m article_reader --data-dir runtime\voice-data serve --lan
+```
+
+Open **Devices** on the desktop page and scan the QR code or enter its one-time code on the phone.
+The app never opens router ports or creates public exposure. LAN mode uses ordinary HTTP: pairing
+controls application access, but traffic is not confidential against someone who can sniff the
+local network. Close the server window or press `Ctrl+C` to stop both listeners immediately.
 
 On the currently inspected Windows host, all three approved voices are installed under
 `runtime/voice-data`, so the direct command is:

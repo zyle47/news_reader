@@ -6,6 +6,14 @@ bind = "127.0.0.1"
 port = 8765
 lan_mode = false
 
+[access]
+session_lifetime_hours = 720
+pairing_lifetime_seconds = 300
+max_sessions_per_viewer = 8
+max_pairing_attempts = 5
+pairing_attempt_window_seconds = 60
+pairing_block_seconds = 60
+
 [worker]
 processes = 1
 tts_threads = 2

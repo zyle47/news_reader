@@ -4,20 +4,23 @@ cd /d "%~dp0"
 
 set "DATA_ARGS="
 if exist "runtime\voice-data\models" set "DATA_ARGS=--data-dir runtime\voice-data"
+set "SERVE_ARGS="
+if /I "%~1"=="lan" set "SERVE_ARGS=--lan"
+if /I "%~1"=="--lan" set "SERVE_ARGS=--lan"
 
 if exist "runtime\venv312\Scripts\python.exe" (
-    "runtime\venv312\Scripts\python.exe" -m article_reader %DATA_ARGS% serve
+    "runtime\venv312\Scripts\python.exe" -m article_reader %DATA_ARGS% serve %SERVE_ARGS%
     goto :finished
 )
 
 if exist ".venv\Scripts\python.exe" (
-    ".venv\Scripts\python.exe" -m article_reader %DATA_ARGS% serve
+    ".venv\Scripts\python.exe" -m article_reader %DATA_ARGS% serve %SERVE_ARGS%
     goto :finished
 )
 
 where uv.exe >nul 2>nul
 if not errorlevel 1 (
-    uv run --locked article-reader %DATA_ARGS% serve
+    uv run --locked article-reader %DATA_ARGS% serve %SERVE_ARGS%
     goto :finished
 )
 

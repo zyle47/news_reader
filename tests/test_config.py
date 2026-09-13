@@ -23,6 +23,8 @@ def test_defaults_match_the_implementation_contract_and_are_immutable(tmp_path: 
     assert settings.server.port == 8765
     assert settings.server.bind == "127.0.0.1"
     assert settings.server.lan_mode is False
+    assert settings.access.session_lifetime_hours == 720
+    assert settings.access.max_sessions_per_viewer == 8
     assert settings.worker.tts_threads == 2
     assert settings.fetch.max_decoded_bytes == 5_242_880
     assert settings.fetch.max_response_bytes == 5_242_880
@@ -126,6 +128,11 @@ def test_prefixed_environment_typo_is_not_silently_ignored() -> None:
         ({"fetch.max_article_characters": 100_001}, "max_article_characters"),
         ({"worker.heartbeat_seconds": 60, "worker.lease_seconds": 100}, "twice"),
         ({"server.bind": "0.0.0.0"}, "lan_mode"),
+        (
+            {"server.bind": "8.8.8.8", "server.lan_mode": True},
+            "private RFC1918/ULA",
+        ),
+        ({"access.pairing_lifetime_seconds": 2}, "pairing_lifetime_seconds"),
     ],
 )
 def test_validation_errors_name_the_invalid_setting(

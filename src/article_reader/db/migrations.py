@@ -201,8 +201,35 @@ _MIGRATION_0001 = (
     """,
 )
 
+_MIGRATION_0002 = (
+    """
+    CREATE TABLE viewer_sessions (
+        session_id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        viewer_id TEXT NOT NULL REFERENCES viewers (viewer_id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT
+    )
+    """,
+    """
+    INSERT INTO viewer_sessions (
+        session_id, token_hash, viewer_id, label, created_at, last_seen_at, expires_at, revoked_at
+    )
+    SELECT
+        lower(hex(randomblob(16))), token_hash, viewer_id, 'Existing browser', created_at,
+        created_at, '9999-12-31T23:59:59+00:00', revoked_at
+    FROM viewer_tokens
+    """,
+    "DROP TABLE viewer_tokens",
+    "CREATE INDEX ix_viewer_sessions_viewer ON viewer_sessions (viewer_id, revoked_at, expires_at)",
+)
+
 MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "Initial durable schema: viewers, readings, articles, renditions, jobs.", _MIGRATION_0001),
+    (2, "Revocable, expiring browser sessions for authenticated LAN access.", _MIGRATION_0002),
 )
 
 CURRENT_SCHEMA_VERSION: int = MIGRATIONS[-1][0]

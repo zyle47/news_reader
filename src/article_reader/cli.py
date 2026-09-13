@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import socket
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -231,12 +232,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = commands.add_parser(
         "serve",
-        help="Run the loopback browser preview reader.",
+        help="Run the browser reader (loopback-only unless --lan is explicit).",
     )
     serve.add_argument(
         "--no-open",
         action="store_true",
         help="Do not open the reader in the default browser automatically.",
+    )
+    serve.add_argument(
+        "--lan",
+        action="store_true",
+        help="Also listen on one private LAN interface and require phone pairing.",
+    )
+    serve.add_argument(
+        "--bind",
+        metavar="PRIVATE_IP",
+        help="Private LAN address to use with --lan (default: safely auto-detect).",
     )
 
     return parser
@@ -248,9 +259,15 @@ def _load_cli_settings(arguments: argparse.Namespace) -> Settings:
     config_file = explicit_config
     if config_file is None and default_config.is_file():
         config_file = default_config
+    overrides: dict[str, object] = {"data_dir": arguments.data_dir}
+    if arguments.command == "serve":
+        if arguments.bind is not None and not arguments.lan:
+            raise ConfigError("serve --bind requires explicit --lan")
+        if arguments.lan:
+            overrides["server.lan_mode"] = True
     return load_settings(
         config_file,
-        overrides={"data_dir": arguments.data_dir},
+        overrides=overrides,
     )
 
 
@@ -984,11 +1001,25 @@ def _worker_dependencies(
     )
 
 
+def _create_listening_socket(host: str, port: int) -> socket.socket:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(2_048)
+        listener.set_inheritable(True)
+    except OSError:
+        listener.close()
+        raise
+    return listener
+
+
 def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
-    if settings.server.lan_mode:
+    if settings.server.lan_mode and not arguments.lan:
         print(
-            "error: the reader is loopback-only until browser sessions and LAN access-code "
-            "protection are implemented.",
+            "error: LAN exposure requires explicit 'serve --lan' on every launch; a config-file "
+            "setting alone is not sufficient.",
             file=sys.stderr,
         )
         return _EXIT_UNAVAILABLE
@@ -1000,7 +1031,27 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
 
     from article_reader.api.app import create_app
     from article_reader.db.connection import Database
+    from article_reader.network import (
+        LanAddressError,
+        discover_private_lan_addresses,
+        http_authority,
+        is_private_lan_address,
+        select_private_lan_address,
+    )
     from article_reader.storage.process_lock import InstanceLock, InstanceLockError
+
+    lan_address: str | None = None
+    if arguments.lan:
+        configured = settings.server.bind
+        requested = arguments.bind
+        if requested is None and is_private_lan_address(configured):
+            requested = configured
+        discovered = discover_private_lan_addresses()
+        try:
+            lan_address = select_private_lan_address(requested, discovered)
+        except LanAddressError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return _EXIT_UNAVAILABLE
 
     ensure_runtime_dirs(settings)
     lock = InstanceLock(settings.paths.data_dir / "instance.lock")
@@ -1013,8 +1064,20 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
     try:
         database = Database(settings.paths.database_path)
         registry = _packaged_registry()
-        app = create_app(settings, database, registry)
+        app = create_app(settings, database, registry, lan_address=lan_address)
         worker = _worker_dependencies(settings, registry, database)
+
+        listeners: list[socket.socket] = []
+        if lan_address is not None:
+            try:
+                listeners.append(_create_listening_socket("127.0.0.1", settings.server.port))
+                listeners.append(_create_listening_socket(lan_address, settings.server.port))
+            except OSError as error:
+                for listener in listeners:
+                    listener.close()
+                database.close()
+                print(f"error: could not open the local reader sockets: {error}", file=sys.stderr)
+                return _EXIT_UNAVAILABLE
 
         stop_event = threading.Event()
         worker_thread = threading.Thread(
@@ -1022,35 +1085,50 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
         )
         worker_thread.start()
 
-        host = settings.server.bind
-        display_host = "localhost" if host in {"127.0.0.1", "::1"} else host
-        url = f"http://{display_host}:{settings.server.port}/"
-        print(f"Article Reader: {url}")
+        desktop_url = f"http://localhost:{settings.server.port}/"
+        print(f"Article Reader (this computer): {desktop_url}")
+        if lan_address is not None:
+            phone_url = f"http://{http_authority(lan_address, settings.server.port)}/"
+            print(f"Article Reader (phone): {phone_url}")
+            print("Open the desktop page, choose 'Pair a phone', then enter the one-time code.")
+            print("LAN traffic uses HTTP and is not confidential against local-network sniffing.")
         print("Press Ctrl+C to stop.")
 
         if not arguments.no_open:
 
             def open_browser() -> None:
                 try:
-                    webbrowser.open(url, new=2)
+                    webbrowser.open(desktop_url, new=2)
                 except OSError:
-                    print(f"Could not open a browser automatically; open {url} manually.")
+                    print(f"Could not open a browser automatically; open {desktop_url} manually.")
 
             timer = threading.Timer(0.8, open_browser)
             timer.daemon = True
             timer.start()
 
         try:
-            uvicorn.run(
-                app,
-                host=host,
-                port=settings.server.port,
-                access_log=False,
-                log_level="info",
-            )
+            if listeners:
+                config = uvicorn.Config(
+                    app,
+                    access_log=False,
+                    log_level="info",
+                    proxy_headers=False,
+                )
+                uvicorn.Server(config).run(sockets=listeners)
+            else:
+                uvicorn.run(
+                    app,
+                    host=settings.server.bind,
+                    port=settings.server.port,
+                    access_log=False,
+                    log_level="info",
+                    proxy_headers=False,
+                )
         finally:
             stop_event.set()
             worker_thread.join(timeout=30)
+            for listener in listeners:
+                listener.close()
             database.close()
     finally:
         lock.release()
@@ -1105,6 +1183,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LanguageDetectorError as exc:
         print(f"error [{exc.code.value}]: {exc}", file=sys.stderr)
         return _EXIT_FAILED
+    except KeyboardInterrupt:
+        print("Article Reader stopped.")
+        return _EXIT_OK
     except OSError as exc:
         print(f"error: local operation failed: {exc}", file=sys.stderr)
         return _EXIT_FAILED
