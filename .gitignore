@@ -17,6 +17,11 @@ config.toml
 .env.*
 *.secret
 
+# Local Claude conversation state and task permissions (keep project settings tracked)
+.claude/*.local.json
+.claude/*.local.json.tmp
+.claude/*.local.lock
+
 # Article Reader runtime data (must never be synchronized through Git)
 .article-reader/
 runtime/

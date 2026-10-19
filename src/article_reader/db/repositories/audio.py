@@ -88,10 +88,10 @@ class SqliteAudioChunkRepository:
                 )
 
             existing = connection.execute(
-                "SELECT 1 FROM audio_chunks WHERE rendition_id = ? AND ordinal = ?",
+                "SELECT state FROM audio_chunks WHERE rendition_id = ? AND ordinal = ?",
                 (chunk.rendition_id, chunk.ordinal),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and existing["state"] == "ready":
                 return PublicationOutcome(
                     committed=False,
                     manifest_revision=None,
@@ -105,6 +105,12 @@ class SqliteAudioChunkRepository:
                     rendition_id, ordinal, state, relative_path, sha256, byte_count,
                     duration_seconds, publication_generation, published_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(rendition_id, ordinal) DO UPDATE SET
+                    state = excluded.state, relative_path = excluded.relative_path,
+                    sha256 = excluded.sha256, byte_count = excluded.byte_count,
+                    duration_seconds = excluded.duration_seconds,
+                    publication_generation = excluded.publication_generation,
+                    published_at = excluded.published_at
                 """,
                 (
                     chunk.rendition_id,
@@ -119,7 +125,8 @@ class SqliteAudioChunkRepository:
                 ),
             )
             published_count_row = connection.execute(
-                "SELECT COUNT(*) AS count FROM audio_chunks WHERE rendition_id = ?",
+                "SELECT COUNT(*) AS count FROM audio_chunks "
+                "WHERE rendition_id = ? AND state = 'ready'",
                 (chunk.rendition_id,),
             ).fetchone()
             published_count = int(published_count_row["count"])

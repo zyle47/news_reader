@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="/static/app.css">
     <script type="module" src="/static/app.js"></script>
   </head>
-  <body>
+  <body data-onion-mode="{{ 'true' if onion_mode else 'false' }}">
     <a class="skip-link" href="#reader-main">Skip to reader</a>
     <header class="site-header">
       <a class="brand" href="/" aria-label="Article Reader home">
@@ -24,6 +24,25 @@
     </header>
 
     <main id="reader-main">
+      <section id="login-panel" class="login-panel" aria-labelledby="login-title" hidden>
+        <p class="eyebrow">Your private reader</p>
+        <h1 id="login-title">Open your library</h1>
+        <p>
+          Sign in with the owner password. This browser stays signed in for up to 30 days.
+          If Tor clears its cookies, sign in again to return to the same library.
+        </p>
+        <form id="login-form" class="login-form">
+          <label for="owner-password">Owner password</label>
+          <input id="owner-password" name="password" type="password"
+                 autocomplete="current-password" maxlength="1024" required>
+          <label for="login-device-label">Device name</label>
+          <input id="login-device-label" name="label" type="text"
+                 autocomplete="off" maxlength="40" value="My phone" required>
+          <button id="login-button" class="primary-button" type="submit">Open library</button>
+        </form>
+        <p id="login-status" class="status" role="status" aria-live="polite" hidden></p>
+      </section>
+
       <section id="pairing-panel" class="pairing-panel" aria-labelledby="pairing-title" hidden>
         <p class="eyebrow">Private local reader</p>
         <h1 id="pairing-title">Pair this device</h1>
@@ -52,14 +71,18 @@
       <section id="devices-panel" class="devices-panel" aria-labelledby="devices-title" hidden>
         <div class="panel-heading">
           <div>
-            <p class="eyebrow">LAN access</p>
+            <p id="devices-eyebrow" class="eyebrow">LAN access</p>
             <h2 id="devices-title">Paired devices</h2>
           </div>
           <button id="close-devices-button" class="icon-button" type="button">Close</button>
         </div>
-        <p>
+        <p id="pairing-help">
           Create a short-lived code here, then enter it on your phone. Codes work once and expire
           after five minutes.
+        </p>
+        <p id="owner-devices-help" hidden>
+          These browsers can open your library. Revoke a browser to require the owner password
+          again, or sign out to disconnect this browser.
         </p>
         <button id="create-pairing-button" class="secondary-button" type="button">
           Create pairing code
@@ -80,8 +103,14 @@
         <p class="eyebrow">Listen, don’t scroll</p>
         <h1 id="page-title">Turn an article into a calm listening session.</h1>
         <p class="lede">
+          {% if onion_mode %}
+          Paste a public article link. Your library and audio stay on your server, and your phone
+          reaches Reader through Tor. Article websites are fetched using the server’s normal
+          internet connection.
+          {% else %}
           Paste a public article link. The text and voice stay on this computer, and your
           reading survives closing this page or restarting the app.
+          {% endif %}
         </p>
 
         <form id="article-form" class="article-form">
@@ -191,6 +220,9 @@
             Cancel
           </button>
           <button id="retry-button" class="icon-button" type="button" hidden>Retry</button>
+          <button id="regenerate-button" class="icon-button" type="button" hidden>
+            Regenerate audio
+          </button>
           <label class="speed-control" for="playback-speed">
             Speed
             <select id="playback-speed">
@@ -206,8 +238,13 @@
     </main>
 
     <footer>
+      {% if onion_mode %}
+      <p>Your private reader over Tor · Article Reader {{ app_version }}</p>
+      <p>Reading history and playback position are saved in your server library.</p>
+      {% else %}
       <p>Runs on this computer · Article Reader {{ app_version }}</p>
       <p>Reading history and playback position are saved on this computer.</p>
+      {% endif %}
     </footer>
   </body>
 </html>

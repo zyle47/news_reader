@@ -229,7 +229,7 @@ def _windows_total_memory_bytes() -> int | None:
     try:
         status = MemoryStatusEx()
         status.dwLength = ctypes.sizeof(MemoryStatusEx)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)  # noqa: B009
         query_memory = kernel32.GlobalMemoryStatusEx
         query_memory.argtypes = [ctypes.POINTER(MemoryStatusEx)]
         query_memory.restype = ctypes.c_int

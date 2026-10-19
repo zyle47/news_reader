@@ -18,6 +18,10 @@ def _session_from_row(row: sqlite3.Row) -> ViewerSessionRecord:
         last_seen_at=str(row["last_seen_at"]),
         expires_at=str(row["expires_at"]),
         revoked_at=None if row["revoked_at"] is None else str(row["revoked_at"]),
+        audience=str(row["audience"]),
+        credential_revision=(
+            None if row["credential_revision"] is None else int(row["credential_revision"])
+        ),
     )
 
 
@@ -38,8 +42,8 @@ class SqliteViewerRepository:
                 """
                 INSERT INTO viewer_sessions (
                     session_id, token_hash, viewer_id, label, created_at,
-                    last_seen_at, expires_at, revoked_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    last_seen_at, expires_at, revoked_at, audience, credential_revision
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.session_id,
@@ -50,6 +54,8 @@ class SqliteViewerRepository:
                     session.last_seen_at,
                     session.expires_at,
                     session.revoked_at,
+                    session.audience,
+                    session.credential_revision,
                 ),
             )
 

@@ -1,10 +1,14 @@
 # Development setup
 
+For the implemented standalone Docker/onion deployment, use [TOR_SETUP.md](TOR_SETUP.md).
+[TOR_ACCEPTANCE.md](TOR_ACCEPTANCE.md) records Linux/Tor evidence and the remaining phone gate.
+The commands below cover development and the desktop/LAN application.
+
 ## Supported status
 
-Windows 11 x64 is the only environment inspected so far. The design is cross-platform, but POSIX
-commands below are unverified until they run on an actual machine. The initial runtime target is
-CPython 3.12; `uv` may install a matching managed interpreter when one is unavailable.
+Historical Windows 11 x64 checks and the Linux x86_64 container/host trial are documented in
+STATUS.md. Physical-phone Tor behavior and other CPU architectures remain unverified. The runtime
+target is CPython 3.12; `uv` may install a matching managed interpreter when one is unavailable.
 
 Do not copy `.venv` between PCs. Clone/copy the source revision and lockfile, then create an
 environment independently on each machine.

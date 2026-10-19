@@ -214,6 +214,7 @@ label {
 
 input[type="url"],
 input[type="text"],
+input[type="password"],
 input[inputmode="numeric"],
 select {
   min-width: 0;
@@ -225,6 +226,7 @@ select {
   border-radius: 0.65rem;
 }
 
+.login-panel,
 .pairing-panel,
 .devices-panel {
   max-width: 680px;
@@ -236,6 +238,7 @@ select {
   box-shadow: var(--shadow);
 }
 
+.login-panel h1,
 .pairing-panel h1,
 .devices-panel h2 {
   margin: 0;
@@ -243,10 +246,25 @@ select {
   line-height: 1;
 }
 
+.login-panel > p,
 .pairing-panel > p,
 .devices-panel > p {
   color: var(--muted);
   line-height: 1.55;
+}
+
+.login-form {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 1.4rem;
+}
+
+.login-form label:not(:first-child) {
+  margin-top: 0.65rem;
+}
+
+.login-form button {
+  margin-top: 0.65rem;
 }
 
 .pairing-form {
@@ -740,6 +758,7 @@ footer p {
     display: none;
   }
 
+  .login-panel,
   .pairing-panel,
   .devices-panel {
     margin: 1.5rem auto;

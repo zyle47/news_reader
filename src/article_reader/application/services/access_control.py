@@ -110,7 +110,7 @@ class AccessService:
             return None
         now = self._clock()
         session = self._viewers.find_session_by_token(self.token_hash(token), now=_iso(now))
-        if session is None:
+        if session is None or session.audience != "desktop_lan":
             return None
         last_seen = datetime.fromisoformat(session.last_seen_at)
         if now - last_seen >= timedelta(minutes=5):

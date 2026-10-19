@@ -1,0 +1,10 @@
+DataDirectory /var/lib/tor
+SocksPort 0
+RunAsDaemon 0
+Log notice stdout
+ControlSocket /var/lib/tor/control.sock
+CookieAuthentication 1
+CookieAuthFile /var/lib/tor/control_auth_cookie
+HiddenServiceDir /var/lib/tor/reader
+HiddenServiceVersion 3
+HiddenServicePort 80 unix:/run/reader-http/http.sock

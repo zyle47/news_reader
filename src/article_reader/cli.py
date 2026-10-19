@@ -6,7 +6,10 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import socket
+import sqlite3
+import stat
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -16,9 +19,11 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from article_reader.db.connection import Database
+    from article_reader.storage.cache_policy import AudioCachePolicy
     from article_reader.worker.loop import WorkerLoop
 
 from article_reader import __version__
+from article_reader.application.ports.owner import OwnerAccessError
 from article_reader.application.ports.speech import SpeechEngine
 from article_reader.application.services.article_ingestion import (
     ArticleIngestionResult,
@@ -239,7 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not open the reader in the default browser automatically.",
     )
-    serve.add_argument(
+    modes = serve.add_mutually_exclusive_group()
+    modes.add_argument(
         "--lan",
         action="store_true",
         help="Also listen on one private LAN interface and require phone pairing.",
@@ -249,6 +255,26 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PRIVATE_IP",
         help="Private LAN address to use with --lan (default: safely auto-detect).",
     )
+    modes.add_argument(
+        "--onion",
+        action="store_true",
+        help="Password-protected onion service over a Unix socket only.",
+    )
+    serve.add_argument("--unix-socket", type=Path)
+    serve.add_argument("--onion-hostname-file", type=Path)
+
+    owner = commands.add_parser("owner", help="Manage the owner while Reader is stopped.")
+    owner_commands = owner.add_subparsers(dest="owner_command", required=True)
+    for name in ("init", "password"):
+        command = owner_commands.add_parser(name)
+        command.add_argument(
+            "--password-file",
+            type=Path,
+            help="Private UTF-8 file for unattended setup; never a command-line password.",
+        )
+    owner_commands.add_parser("revoke-all")
+    rebind = owner_commands.add_parser("bind-hostname")
+    rebind.add_argument("--hostname-file", type=Path, required=True)
 
     return parser
 
@@ -265,6 +291,22 @@ def _load_cli_settings(arguments: argparse.Namespace) -> Settings:
             raise ConfigError("serve --bind requires explicit --lan")
         if arguments.lan:
             overrides["server.lan_mode"] = True
+        if arguments.onion:
+            from article_reader.security.onion import read_onion_hostname
+
+            if arguments.unix_socket is None or arguments.onion_hostname_file is None:
+                raise ConfigError("serve --onion requires --unix-socket and --onion-hostname-file")
+            if os.name == "nt":
+                raise ConfigError("Onion Unix socket serving requires Linux")
+            overrides["server.onion_mode"] = True
+            try:
+                overrides["server.onion_hostname"] = read_onion_hostname(
+                    arguments.onion_hostname_file, timeout=60
+                )
+            except ValueError as error:
+                raise ConfigError(str(error)) from error
+        elif arguments.unix_socket is not None or arguments.onion_hostname_file is not None:
+            raise ConfigError("Onion socket/hostname arguments require explicit --onion")
     return load_settings(
         config_file,
         overrides=overrides,
@@ -964,7 +1006,10 @@ def _run_prepare_article(arguments: argparse.Namespace, settings: Settings) -> i
 
 
 def _worker_dependencies(
-    settings: Settings, registry: VoiceRegistry, database: Database
+    settings: Settings,
+    registry: VoiceRegistry,
+    database: Database,
+    cache_policy: AudioCachePolicy | None = None,
 ) -> WorkerLoop:
     from article_reader.db.repositories import (
         SqliteArticleRepository,
@@ -998,6 +1043,7 @@ def _worker_dependencies(
             lease_seconds=settings.worker.lease_seconds,
             max_automatic_recoveries=settings.worker.max_automatic_recoveries,
         ),
+        cache_policy=cache_policy,
     )
 
 
@@ -1016,6 +1062,8 @@ def _create_listening_socket(host: str, port: int) -> socket.socket:
 
 
 def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
+    if settings.server.onion_mode and not arguments.onion:
+        raise ConfigError("Onion serving requires explicit 'serve --onion' on every launch")
     if settings.server.lan_mode and not arguments.lan:
         print(
             "error: LAN exposure requires explicit 'serve --lan' on every launch; a config-file "
@@ -1061,14 +1109,89 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
         print(f"error: {error}", file=sys.stderr)
         return _EXIT_UNAVAILABLE
 
+    database: Database | None = None
     try:
         database = Database(settings.paths.database_path)
         registry = _packaged_registry()
-        app = create_app(settings, database, registry, lan_address=lan_address)
-        worker = _worker_dependencies(settings, registry, database)
+        from article_reader.db.repositories.cache import SqliteCacheRepository
+        from article_reader.storage.cache_policy import AudioCachePolicy
+
+        cache_policy = AudioCachePolicy(
+            repository=SqliteCacheRepository(database),
+            audio_root=settings.paths.audio_dir / "renditions",
+            max_audio_bytes=settings.cache.max_audio_bytes,
+            min_free_disk_bytes=settings.cache.min_free_disk_bytes,
+            playback_lease_seconds=settings.cache.playback_lease_seconds,
+            max_saved_readings_per_viewer=settings.history.max_saved_readings_per_viewer,
+            inactive_days=settings.cache.inactive_days,
+        )
+        cache_policy.maintain()
+        worker = _worker_dependencies(settings, registry, database, cache_policy)
+        if settings.server.onion_mode:
+            from article_reader.clock import now_iso
+            from article_reader.db.repositories.owner import SqliteOwnerRepository
+
+            SqliteOwnerRepository(database).bind_hostname(
+                settings.server.onion_hostname, allow_change=False, now=now_iso()
+            )
+
+        worker_thread: threading.Thread
+        model_ready = all(
+            ModelStore(settings.paths.models_dir).inspect(voice).installed for voice in registry
+        )
+
+        def ready() -> bool:
+            from article_reader.clock import now_iso
+
+            assert database is not None
+            try:
+                with database.read() as connection:
+                    connection.execute("SELECT 1").fetchone()
+                    overdue = connection.execute(
+                        "SELECT 1 FROM jobs WHERE state='running' AND lease_expires_at<? LIMIT 1",
+                        (now_iso(),),
+                    ).fetchone()
+                return (
+                    worker_thread.is_alive()
+                    and overdue is None
+                    and (model_ready or not settings.server.onion_mode)
+                    and shutil.disk_usage(settings.paths.data_dir).free
+                    >= settings.cache.min_free_disk_bytes
+                )
+            except (OSError, RuntimeError, sqlite3.Error):
+                return False
+
+        app = create_app(
+            settings,
+            database,
+            registry,
+            lan_address=lan_address,
+            readiness_checker=ready,
+            cache_policy=cache_policy,
+        )
 
         listeners: list[socket.socket] = []
-        if lan_address is not None:
+        socket_path: Path | None = None
+        if settings.server.onion_mode:
+            socket_path = arguments.unix_socket.absolute()
+            if not socket_path.parent.is_dir():
+                raise ConfigError(
+                    "Unix socket directory is missing; run the volume init service first"
+                )
+            if socket_path.exists():
+                if not stat.S_ISSOCK(socket_path.lstat().st_mode):
+                    raise ConfigError("Refusing to replace a non-socket at the Unix socket path")
+                socket_path.unlink()
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+                socket_path.chmod(0o660)
+                listener.listen(2048)
+                listeners.append(listener)
+            except BaseException:
+                listener.close()
+                raise
+        elif lan_address is not None:
             try:
                 listeners.append(_create_listening_socket("127.0.0.1", settings.server.port))
                 listeners.append(_create_listening_socket(lan_address, settings.server.port))
@@ -1081,12 +1204,19 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
 
         stop_event = threading.Event()
         worker_thread = threading.Thread(
-            target=worker.run_forever, args=(stop_event,), name="article-reader-worker"
+            target=worker.run_forever,
+            args=(stop_event,),
+            name="article-reader-worker",
+            daemon=True,
         )
         worker_thread.start()
 
         desktop_url = f"http://localhost:{settings.server.port}/"
-        print(f"Article Reader (this computer): {desktop_url}")
+        if settings.server.onion_mode:
+            print(f"Article Reader (Tor): http://{settings.server.onion_hostname}/")
+            print("Owner password login required. Models need explicit installation.")
+        else:
+            print(f"Article Reader (this computer): {desktop_url}")
         if lan_address is not None:
             phone_url = f"http://{http_authority(lan_address, settings.server.port)}/"
             print(f"Article Reader (phone): {phone_url}")
@@ -1094,7 +1224,7 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
             print("LAN traffic uses HTTP and is not confidential against local-network sniffing.")
         print("Press Ctrl+C to stop.")
 
-        if not arguments.no_open:
+        if not arguments.no_open and not settings.server.onion_mode:
 
             def open_browser() -> None:
                 try:
@@ -1113,6 +1243,8 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
                     access_log=False,
                     log_level="info",
                     proxy_headers=False,
+                    timeout_graceful_shutdown=30,
+                    limit_concurrency=64,
                 )
                 uvicorn.Server(config).run(sockets=listeners)
             else:
@@ -1126,13 +1258,83 @@ def _run_serve(arguments: argparse.Namespace, settings: Settings) -> int:
                 )
         finally:
             stop_event.set()
-            worker_thread.join(timeout=30)
+            worker_thread.join(timeout=60)
+            if worker_thread.is_alive():
+                # Never release ownership while an unresponsive extractor could still publish.
+                # Kernel closes the advisory lock and SQLite connections atomically on exit.
+                print(
+                    "Worker did not stop within 60 seconds; exiting for durable recovery.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                os._exit(1)
             for listener in listeners:
                 listener.close()
             database.close()
+            if socket_path is not None:
+                socket_path.unlink(missing_ok=True)
     finally:
+        if database is not None:
+            database.close()
         lock.release()
     return _EXIT_OK
+
+
+def _run_owner(arguments: argparse.Namespace, settings: Settings) -> int:
+    import getpass
+
+    from article_reader.application.ports.owner import OwnerAccessError
+    from article_reader.application.services.owner_access import OwnerAccessService
+    from article_reader.clock import now_iso
+    from article_reader.db.connection import Database
+    from article_reader.db.repositories.owner import SqliteOwnerRepository
+    from article_reader.security.onion import read_onion_hostname
+    from article_reader.security.passwords import Argon2PasswordHasher
+    from article_reader.storage.process_lock import InstanceLock, InstanceLockError
+
+    ensure_runtime_dirs(settings)
+    lock = InstanceLock(settings.paths.data_dir / "instance.lock")
+    database: Database | None = None
+    try:
+        lock.acquire()
+        database = Database(settings.paths.database_path)
+        repository = SqliteOwnerRepository(database)
+        service = OwnerAccessService(
+            repository,
+            Argon2PasswordHasher(),
+            session_lifetime_seconds=settings.access.session_lifetime_hours * 3600,
+            max_sessions=settings.access.max_sessions_per_viewer,
+        )
+        if arguments.owner_command in {"init", "password"}:
+            if arguments.password_file:
+                with arguments.password_file.open("rb") as stream:
+                    raw = stream.read(1026)
+                if len(raw) > 1025:
+                    raise OwnerAccessError("Password file is too large.")
+                password = raw.decode("utf-8").removesuffix("\n")
+            else:
+                password = getpass.getpass("Owner password (12-256 characters): ")
+                if password != getpass.getpass("Repeat password: "):
+                    raise OwnerAccessError("Passwords do not match.")
+            if arguments.owner_command == "init":
+                service.initialize(password)
+            else:
+                service.reset_password(password)
+        elif arguments.owner_command == "revoke-all":
+            repository.revoke_all(now=now_iso())
+        else:
+            repository.bind_hostname(
+                read_onion_hostname(arguments.hostname_file), allow_change=True, now=now_iso()
+            )
+        print("Owner administration completed.")
+        return _EXIT_OK
+    except (OwnerAccessError, InstanceLockError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_UNAVAILABLE
+    finally:
+        if database is not None:
+            database.close()
+        lock.release()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1156,8 +1358,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_prepare_article(arguments, settings)
         if arguments.command == "serve":
             return _run_serve(arguments, settings)
+        if arguments.command == "owner":
+            return _run_owner(arguments, settings)
     except (
         ConfigError,
+        OwnerAccessError,
         EvaluationCorpusError,
         EvaluationError,
         VoiceRegistryError,

@@ -4,6 +4,12 @@ Article Reader is a local-first application that extracts useful article text an
 in Serbian, English, or German. The project is being implemented incrementally from
 [`article-reader-project-plan.md`](article-reader-project-plan.md).
 
+Reader now also runs as a standalone Docker service with its own password-protected Tor onion
+address. Start with [the Tor setup/runbook](docs/TOR_SETUP.md), [host trial evidence](docs/TOR_ACCEPTANCE.md),
+and [the architecture](docs/TOR_ARCHITECTURE.md). Owner sessions restore the same server library;
+audio storage is bounded and old audio can be regenerated. Physical-phone acceptance is still open.
+Continuing agents should start with [`AGENTS.md`](AGENTS.md) and [`docs/HANDOFF.md`](docs/HANDOFF.md).
+
 The current M4 build has the complete local reading path: security-hardened public-HTTP(S)
 extraction, approved local Piper voices, durable SQLite jobs/audio/history/progress, progressive
 playback, and an optional paired-phone mode. Normal startup remains loopback-only. Explicit LAN
@@ -39,11 +45,11 @@ To listen from a phone on the same trusted Wi-Fi, double-click **`start-reader-l
 ```
 
 Open **Devices** on the desktop page and scan the QR code or enter its one-time code on the phone.
-The app never opens router ports or creates public exposure. LAN mode uses ordinary HTTP: pairing
+LAN mode stays on the selected private interface and uses ordinary HTTP: pairing
 controls application access, but traffic is not confidential against someone who can sniff the
 local network. Close the server window or press `Ctrl+C` to stop both listeners immediately.
 
-On the currently inspected Windows host, all three approved voices are installed under
+On the historical Windows host (2026-09-13), all three approved voices are installed under
 `runtime/voice-data`, so the direct command is:
 
 ```powershell

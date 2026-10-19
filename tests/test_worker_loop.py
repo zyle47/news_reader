@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+from article_reader.application.ports.cache import CachePolicy
 from article_reader.application.ports.durable_audio import (
     AudioPublicationError,
     DurableAudioStore,
@@ -26,6 +28,7 @@ from article_reader.application.ports.speech import SpeechEngine
 from article_reader.application.services.article_ingestion import ArticleIngestionResult
 from article_reader.application.services.article_preparation import ArticlePreparationService
 from article_reader.clock import now_iso
+from article_reader.db.connection import Database
 from article_reader.domain.article import ArticleBlock, ArticleBlockKind, ExtractedArticle
 from article_reader.domain.language import LanguageCandidate, LanguageDetection
 from article_reader.domain.speech import (
@@ -140,6 +143,7 @@ def _worker(
     heartbeat_seconds: float = 5,
     lease_seconds: float = 60,
     max_automatic_recoveries: int = 1,
+    cache_policy: CachePolicy | None = None,
 ) -> WorkerLoop:
     preparation_service = ArticlePreparationService(
         ingestor or _Ingestor(),
@@ -164,6 +168,7 @@ def _worker(
             lease_seconds=lease_seconds,
             max_automatic_recoveries=max_automatic_recoveries,
         ),
+        cache_policy=cache_policy,
     )
 
 
@@ -502,3 +507,65 @@ def test_stale_worker_generation_cannot_publish_after_losing_lease(
     )
     assert outcome.committed is False
     assert outcome.rejected_reason == "stale_generation"
+
+
+def test_shutdown_abandons_native_wait_without_publishing_or_losing_durable_lease(
+    repos: Repos, tmp_path: Path
+) -> None:
+    viewer = seed_viewer(repos)
+    reading_id = seed_reading(repos, viewer)
+    article_id = seed_article_ready_for_voice(repos, reading_id)
+    rendition = _seed_rendition(repos, reading_id, article_id, total_chunks=2)
+    _seed_synthesize_job(repos, reading_id, rendition.rendition_id)
+    entered = threading.Event()
+    finish_native = threading.Event()
+    stop = threading.Event()
+
+    class SlowEngine(FakeSpeechEngine):
+        def synthesize(self, text: str, settings: SpeechSettings) -> AudioResult:
+            entered.set()
+            finish_native.wait(5)
+            return super().synthesize(text, settings)
+
+    worker = _worker(repos, tmp_path, engine_factory=SlowEngine, chunk_timeout_seconds=30)
+    thread = threading.Thread(target=worker.run_forever, args=(stop,))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        stop.set()
+        thread.join(1)
+        assert not thread.is_alive()
+        job = repos.jobs.get("synth-job-1")
+        assert job is not None and job.state is JobState.RUNNING
+        assert not repos.audio_chunks.list_for_rendition(rendition.rendition_id)
+    finally:
+        finish_native.set()
+        stop.set()
+        thread.join(5)
+
+
+def test_storage_full_fails_with_stable_code_before_synthesis(
+    repos: Repos, tmp_path: Path, database: Database
+) -> None:
+    from article_reader.db.repositories.cache import SqliteCacheRepository
+    from article_reader.storage.cache_policy import AudioCachePolicy
+
+    viewer = seed_viewer(repos)
+    reading_id = seed_reading(repos, viewer)
+    article_id = seed_article_ready_for_voice(repos, reading_id)
+    rendition = _seed_rendition(repos, reading_id, article_id, total_chunks=2)
+    _seed_synthesize_job(repos, reading_id, rendition.rendition_id)
+    engine = FakeSpeechEngine()
+    cache = AudioCachePolicy(
+        repository=SqliteCacheRepository(database),
+        audio_root=tmp_path / "audio",
+        max_audio_bytes=10,
+        min_free_disk_bytes=0,
+        playback_lease_seconds=180,
+        max_saved_readings_per_viewer=200,
+    )
+    worker = _worker(repos, tmp_path, engine_factory=lambda: engine, cache_policy=cache)
+    worker.run_once()
+    job = repos.jobs.get("synth-job-1")
+    assert job is not None and job.error_code == "STORAGE_FULL"
+    assert engine.synthesis_count == 0

@@ -227,9 +227,45 @@ _MIGRATION_0002 = (
     "CREATE INDEX ix_viewer_sessions_viewer ON viewer_sessions (viewer_id, revoked_at, expires_at)",
 )
 
+_MIGRATION_0003 = (
+    "ALTER TABLE viewer_sessions ADD COLUMN audience TEXT NOT NULL DEFAULT 'desktop_lan'",
+    "ALTER TABLE viewer_sessions ADD COLUMN credential_revision INTEGER",
+    """CREATE TABLE owner_credentials (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        viewer_id TEXT NOT NULL UNIQUE REFERENCES viewers(viewer_id),
+        password_hash TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        hostname TEXT,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE owner_login_throttle (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        window_started_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        blocked_until TEXT
+    )""",
+)
+
+_MIGRATION_0004 = (
+    """CREATE TABLE cache_access (
+        rendition_id TEXT PRIMARY KEY REFERENCES renditions(rendition_id) ON DELETE CASCADE,
+        last_access_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE playback_leases (
+        rendition_id TEXT PRIMARY KEY REFERENCES renditions(rendition_id) ON DELETE CASCADE,
+        expires_at TEXT NOT NULL
+    )""",
+)
+
 MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (1, "Initial durable schema: viewers, readings, articles, renditions, jobs.", _MIGRATION_0001),
     (2, "Revocable, expiring browser sessions for authenticated LAN access.", _MIGRATION_0002),
+    (
+        3,
+        "Separate onion owner credentials, session audience and durable login throttle.",
+        _MIGRATION_0003,
+    ),
+    (4, "Audio cache access times and durable playback leases.", _MIGRATION_0004),
 )
 
 CURRENT_SCHEMA_VERSION: int = MIGRATIONS[-1][0]
