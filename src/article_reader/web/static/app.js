@@ -1,5 +1,11 @@
 const elements = {
   appShell: document.querySelector("#app-shell"),
+  loginPanel: document.querySelector("#login-panel"),
+  loginForm: document.querySelector("#login-form"),
+  ownerPassword: document.querySelector("#owner-password"),
+  loginDeviceLabel: document.querySelector("#login-device-label"),
+  loginButton: document.querySelector("#login-button"),
+  loginStatus: document.querySelector("#login-status"),
   pairingPanel: document.querySelector("#pairing-panel"),
   pairingForm: document.querySelector("#pairing-form"),
   pairingCode: document.querySelector("#pairing-code"),
@@ -10,6 +16,10 @@ const elements = {
   devicesButton: document.querySelector("#devices-button"),
   logoutButton: document.querySelector("#logout-button"),
   devicesPanel: document.querySelector("#devices-panel"),
+  devicesEyebrow: document.querySelector("#devices-eyebrow"),
+  devicesTitle: document.querySelector("#devices-title"),
+  pairingHelp: document.querySelector("#pairing-help"),
+  ownerDevicesHelp: document.querySelector("#owner-devices-help"),
   closeDevicesButton: document.querySelector("#close-devices-button"),
   createPairingButton: document.querySelector("#create-pairing-button"),
   pairingOffer: document.querySelector("#pairing-offer"),
@@ -52,6 +62,7 @@ const elements = {
   nextButton: document.querySelector("#next-button"),
   cancelButton: document.querySelector("#cancel-button"),
   retryButton: document.querySelector("#retry-button"),
+  regenerateButton: document.querySelector("#regenerate-button"),
   speed: document.querySelector("#playback-speed"),
 };
 
@@ -66,18 +77,20 @@ const state = {
   progressRevision: null,
   readingPollHandle: null,
   manifestPollHandle: null,
+  leaseRefreshHandle: null,
   manifestPollToken: 0,
   playbackGeneration: 0,
   playerInitialized: false,
   autoplayPending: false,
   initialized: false,
-  auth: null,
+  auth: { authenticated: false, onion_mode: document.body.dataset.onionMode === "true" },
   connectionFailures: 0,
   wakeLock: null,
 };
 
 const READING_POLL_MS = 1200;
 const MANIFEST_POLL_MS = 1000;
+const LEASE_REFRESH_MS = 45_000;
 
 const languageNames = { en: "English", de: "German", sr: "Serbian" };
 const reviewLabels = {
@@ -138,7 +151,8 @@ async function api(path, options = {}) {
     const error = new Error(document_?.error?.message || `Request failed (${response.status}).`);
     error.code = document_?.error?.code || null;
     error.status = response.status;
-    if (response.status === 401 && path !== "/api/pairings/redeem") showPairingScreen();
+    if (response.status === 401
+      && path !== "/api/pairings/redeem" && path !== "/api/auth/login") showAccessScreen();
     throw error;
   }
   return document_;
@@ -162,7 +176,34 @@ function showPairingStatus(message, error = false) {
   elements.pairingStatus.hidden = false;
 }
 
+function showLoginStatus(message, error = false) {
+  elements.loginStatus.textContent = message;
+  elements.loginStatus.classList.toggle("error", error);
+  elements.loginStatus.hidden = false;
+}
+
+function showAccessScreen() {
+  state.auth = { ...state.auth, authenticated: false };
+  state.initialized = false;
+  // Clear selection before pausing so its pause event cannot save under a revoked session.
+  state.readingId = null;
+  resetView();
+  elements.appShell.hidden = true;
+  elements.devicesPanel.hidden = true;
+  elements.devicesButton.hidden = true;
+  elements.logoutButton.hidden = true;
+  if (state.auth.onion_mode) {
+    elements.pairingPanel.hidden = true;
+    elements.loginPanel.hidden = false;
+    elements.ownerPassword.value = "";
+    elements.modeBadge.lastChild.textContent = " Private reader over Tor";
+  } else {
+    showPairingScreen();
+  }
+}
+
 function showPairingScreen() {
+  elements.loginPanel.hidden = true;
   elements.appShell.hidden = true;
   elements.pairingPanel.hidden = false;
   elements.devicesButton.hidden = true;
@@ -189,13 +230,56 @@ async function initializeReader() {
 
 async function showReader(auth) {
   state.auth = auth;
+  elements.loginPanel.hidden = true;
   elements.pairingPanel.hidden = true;
   elements.appShell.hidden = false;
-  elements.modeBadge.lastChild.textContent = auth.lan_mode ? " Paired LAN" : " Local, durable";
-  elements.devicesButton.hidden = !(auth.lan_mode && auth.loopback);
-  elements.logoutButton.hidden = !(auth.lan_mode && !auth.loopback);
+  elements.modeBadge.lastChild.textContent = auth.onion_mode
+    ? " Private reader over Tor" : auth.lan_mode ? " Paired LAN" : " Local, durable";
+  elements.devicesButton.hidden = !(auth.onion_mode || (auth.lan_mode && auth.loopback));
+  elements.logoutButton.hidden = !(auth.onion_mode || (auth.lan_mode && !auth.loopback));
+  elements.logoutButton.textContent = auth.onion_mode ? "Sign out" : "Disconnect";
+  elements.devicesEyebrow.textContent = auth.onion_mode ? "Library access" : "LAN access";
+  elements.devicesTitle.textContent = auth.onion_mode ? "Signed-in browsers" : "Paired devices";
+  elements.pairingHelp.hidden = Boolean(auth.onion_mode);
+  elements.ownerDevicesHelp.hidden = !auth.onion_mode;
+  elements.createPairingButton.hidden = Boolean(auth.onion_mode);
+  elements.pairingOffer.hidden = true;
   configureMediaSession();
   await initializeReader();
+}
+
+async function loginOwner(event) {
+  event.preventDefault();
+  elements.loginButton.disabled = true;
+  showLoginStatus("Opening your library…");
+  try {
+    // The password exists only in this request and the input is cleared immediately.
+    const body = JSON.stringify({
+      password: elements.ownerPassword.value,
+      label: elements.loginDeviceLabel.value.trim() || "My browser",
+    });
+    elements.ownerPassword.value = "";
+    await api("/api/auth/login", { method: "POST", body });
+    const auth = await api("/api/auth");
+    state.auth = auth;
+    if (!auth.authenticated) {
+      showAccessScreen();
+      showLoginStatus("Sign-in could not be remembered. Allow cookies for this Reader address.", true);
+      return;
+    }
+    elements.loginStatus.hidden = true;
+    await showReader(auth);
+  } catch (error) {
+    const message = error.code === "LOGIN_RATE_LIMITED"
+      ? "Too many sign-in attempts. Wait a minute, then try again."
+      : error.code === "LOGIN_REJECTED"
+        ? "Could not sign in. Check the owner password and try again."
+        : error.message;
+    showLoginStatus(message, true);
+  } finally {
+    elements.ownerPassword.value = "";
+    elements.loginButton.disabled = false;
+  }
 }
 
 async function pairDevice(event) {
@@ -290,9 +374,9 @@ async function createPairingOffer() {
 async function logout() {
   try {
     await api("/api/logout", { method: "POST" });
-  } finally {
-    state.initialized = false;
-    showPairingScreen();
+    showAccessScreen();
+  } catch (error) {
+    showStatus(`Could not sign out: ${error.message}`, true);
   }
 }
 
@@ -323,10 +407,12 @@ function updateScriptChoice() {
 }
 
 function resetPlayer() {
+  clearTimer("leaseRefreshHandle");
   elements.audio.pause();
   elements.audio.removeAttribute("src");
   elements.audio.load();
   elements.playerPanel.hidden = true;
+  elements.regenerateButton.hidden = true;
   state.manifest = null;
   state.chunkIndex = 0;
   state.playerInitialized = false;
@@ -395,7 +481,9 @@ function renderVoiceChoices(reading) {
   elements.voice.disabled = voices.length === 0;
   elements.generateButton.disabled = voices.length === 0;
   elements.voiceHelp.textContent = voices.length
-    ? "Audio is generated and stays local to this computer."
+    ? state.auth.onion_mode
+      ? "Audio is generated and saved on your server."
+      : "Audio is generated and stays local to this computer."
     : "No approved compatible voice is installed in this data directory.";
 }
 
@@ -490,14 +578,22 @@ function progressKey() {
 
 function saveLocalSpeedHint() {
   const key = progressKey();
-  if (key) localStorage.setItem(key, elements.speed.value);
+  try {
+    if (key) localStorage.setItem(key, elements.speed.value);
+  } catch {
+    // Private-browser storage is optional; the server also saves playback speed.
+  }
 }
 
 function localSpeedHint() {
   const key = progressKey();
   if (!key) return null;
-  const value = Number(localStorage.getItem(key));
-  return [0.75, 1, 1.25, 1.5].includes(value) ? value : null;
+  try {
+    const value = Number(localStorage.getItem(key));
+    return [0.75, 1, 1.25, 1.5].includes(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 async function saveProgress(force = false) {
@@ -597,12 +693,58 @@ function configureMediaSession() {
   }
 }
 
+function audioEvicted(manifest) {
+  return manifest?.state === "evicted"
+    || Boolean(manifest?.chunks.some((chunk) => chunk.state === "evicted"));
+}
+
+async function renewPlaybackLease(renditionId, { keepalive = false } = {}) {
+  try {
+    await api(`/api/renditions/${renditionId}/lease`, { method: "POST", keepalive });
+    return true;
+  } catch (error) {
+    if (state.manifest?.rendition_id !== renditionId) return false;
+    if (error.code === "AUDIO_EXPIRED") {
+      elements.audio.pause();
+      elements.regenerateButton.hidden = false;
+      clearTimer("leaseRefreshHandle");
+      showStatus("This audio was cleared to make space. Regenerate it to listen again.");
+      startManifestPolling(renditionId);
+    } else if (error.status !== 401) {
+      showStatus("Could not keep this audio ready. Reconnecting to the reader…");
+    }
+    return false;
+  }
+}
+
+function schedulePlaybackLease() {
+  clearTimer("leaseRefreshHandle");
+  const renditionId = state.manifest?.rendition_id;
+  if (!renditionId || !state.auth.authenticated || audioEvicted(state.manifest)) return;
+  state.leaseRefreshHandle = setTimeout(async () => {
+    await renewPlaybackLease(renditionId);
+    if (state.manifest?.rendition_id === renditionId) schedulePlaybackLease();
+  }, LEASE_REFRESH_MS);
+}
+
 async function loadChunk(index, { autoplay = false, restoreTime = 0 } = {}) {
   const manifest = state.manifest;
   if (!manifest || index < 0 || index >= manifest.chunks.length) return;
   const chunk = manifest.chunks[index];
-  if (chunk.state !== "ready") return;
+  if (chunk.state !== "ready" || !chunk.audio_url) return;
   const generation = state.playbackGeneration;
+  if (!await renewPlaybackLease(manifest.rendition_id)) {
+    if (generation === state.playbackGeneration && state.auth.authenticated) {
+      state.playerInitialized = false;
+      clearTimer("manifestPollHandle");
+      state.manifestPollHandle = setTimeout(() => {
+        if (generation === state.playbackGeneration) startManifestPolling(manifest.rendition_id);
+      }, 3000);
+    }
+    return;
+  }
+  if (generation !== state.playbackGeneration || state.manifest?.rendition_id !== manifest.rendition_id) return;
+  schedulePlaybackLease();
   saveProgress(true);
   state.chunkIndex = index;
   elements.audio.src = chunk.audio_url;
@@ -637,6 +779,23 @@ function renderManifest(manifest) {
   }
   state.manifest = manifest;
   elements.playerPanel.hidden = false;
+  const evicted = audioEvicted(manifest);
+  elements.regenerateButton.hidden = !evicted;
+  if (evicted) {
+    clearTimer("leaseRefreshHandle");
+    if (state.playerInitialized) {
+      elements.audio.pause();
+      elements.audio.removeAttribute("src");
+      elements.audio.load();
+      state.playerInitialized = false;
+    }
+    elements.previousButton.disabled = true;
+    elements.nextButton.disabled = true;
+    elements.currentSegment.textContent = "The article text is still saved in your library.";
+    elements.playerPosition.textContent = "Audio cleared";
+    showStatus("This audio was cleared to make space. Regenerate it to listen again.");
+    return;
+  }
 
   if (!state.playerInitialized && manifest.ready_prefix_count > 0) {
     state.playerInitialized = true;
@@ -684,7 +843,7 @@ async function pollManifestOnce(renditionId, token) {
     if (token !== state.manifestPollToken) return;
     renderManifest(manifest);
     const settled = manifest.state === "ready" || manifest.state === "failed"
-      || manifest.state === "cancelled";
+      || manifest.state === "cancelled" || audioEvicted(manifest);
     if (!settled) {
       state.manifestPollHandle = setTimeout(
         () => pollManifestOnce(renditionId, token),
@@ -692,7 +851,7 @@ async function pollManifestOnce(renditionId, token) {
       );
     }
   } catch (error) {
-    if (token !== state.manifestPollToken) return;
+    if (token !== state.manifestPollToken || !state.auth.authenticated) return;
     showStatus(error.message || "Connection lost. Reconnecting…");
     state.manifestPollHandle = setTimeout(
       () => pollManifestOnce(renditionId, token),
@@ -716,6 +875,7 @@ async function pollReadingOnce() {
     state.reading = reading;
     renderReadingDocument(reading);
   } catch (error) {
+    if (!state.auth.authenticated || state.readingId !== readingId) return;
     showStatus(error.message, state.connectionFailures === 0);
     state.readingPollHandle = setTimeout(
       pollReadingOnce,
@@ -823,19 +983,24 @@ async function resolveReading() {
 async function generateAudio() {
   if (!state.readingId || !elements.voice.value) return;
   elements.generateButton.disabled = true;
+  elements.regenerateButton.disabled = true;
   showStatus("Queuing audio generation…");
   state.autoplayPending = true;
   try {
-    await api(`/api/readings/${state.readingId}/renditions`, {
+    const rendition = await api(`/api/readings/${state.readingId}/renditions`, {
       method: "POST",
       body: JSON.stringify({ voice_id: elements.voice.value }),
     });
+    // Regeneration can reuse the same rendition ID, so refresh even when the ID is unchanged.
+    state.playerInitialized = false;
+    startManifestPolling(rendition.rendition_id);
     startReadingPolling();
   } catch (error) {
     state.autoplayPending = false;
     showStatus(error.message, true);
   } finally {
     elements.generateButton.disabled = false;
+    elements.regenerateButton.disabled = false;
   }
 }
 
@@ -929,6 +1094,7 @@ async function loadHistory() {
 
 elements.form.addEventListener("submit", submitReading);
 elements.pairingForm.addEventListener("submit", pairDevice);
+elements.loginForm.addEventListener("submit", loginOwner);
 elements.devicesButton.addEventListener("click", openDevices);
 elements.closeDevicesButton.addEventListener("click", () => {
   elements.devicesPanel.hidden = true;
@@ -938,6 +1104,7 @@ elements.logoutButton.addEventListener("click", logout);
 elements.language.addEventListener("change", updateScriptChoice);
 elements.resolveButton.addEventListener("click", resolveReading);
 elements.generateButton.addEventListener("click", generateAudio);
+elements.regenerateButton.addEventListener("click", generateAudio);
 elements.cancelButton.addEventListener("click", cancelActiveJob);
 elements.retryButton.addEventListener("click", retryFailedJob);
 elements.previousButton.addEventListener("click", () => {
@@ -958,6 +1125,10 @@ elements.speed.addEventListener("change", () => {
   saveProgress(true);
 });
 elements.audio.addEventListener("play", () => {
+  if (state.manifest) {
+    renewPlaybackLease(state.manifest.rendition_id);
+    schedulePlaybackLease();
+  }
   playbackChannel?.postMessage({ type: "playing", tabId });
   acquireWakeLock();
 });
@@ -966,6 +1137,11 @@ elements.audio.addEventListener("pause", () => {
   saveProgress(true);
 });
 elements.audio.addEventListener("timeupdate", () => saveProgress(false));
+elements.audio.addEventListener("error", () => {
+  if (!state.manifest || !state.auth.authenticated) return;
+  showStatus("Audio could not load. Reconnecting to check this saved reading…", true);
+  startManifestPolling(state.manifest.rendition_id);
+});
 elements.audio.addEventListener("loadedmetadata", () => {
   if (state.restoreTime > 0 && state.restoreTime < elements.audio.duration) {
     elements.audio.currentTime = state.restoreTime;
@@ -985,26 +1161,37 @@ elements.audio.addEventListener("ended", async () => {
   }
 });
 window.addEventListener("beforeunload", () => saveProgress(true));
-window.addEventListener("offline", () => showStatus("Wi-Fi connection lost. Reconnecting…"));
+window.addEventListener("offline", () => showStatus("Connection lost. Reconnecting…"));
 window.addEventListener("online", () => {
   showStatus("Connection restored.");
   if (state.readingId) startReadingPolling();
+  if (state.manifest) {
+    renewPlaybackLease(state.manifest.rendition_id);
+    schedulePlaybackLease();
+  }
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && !elements.audio.paused) acquireWakeLock();
+  if (state.manifest && state.auth.authenticated) {
+    renewPlaybackLease(state.manifest.rendition_id, { keepalive: true });
+    schedulePlaybackLease();
+    if (document.visibilityState === "visible") startManifestPolling(state.manifest.rendition_id);
+  }
 });
 
 async function initialize() {
   try {
     const auth = await api("/api/auth");
+    state.auth = auth;
     if (auth.authenticated) {
       await showReader(auth);
     } else {
-      showPairingScreen();
+      showAccessScreen();
     }
   } catch (error) {
-    showPairingScreen();
-    showPairingStatus(error.message, true);
+    showAccessScreen();
+    if (state.auth.onion_mode) showLoginStatus(error.message, true);
+    else showPairingStatus(error.message, true);
   }
 }
 

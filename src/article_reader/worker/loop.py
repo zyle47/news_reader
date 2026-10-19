@@ -8,15 +8,18 @@ thread rather than a separate OS process, and ADR-021 for the chunk-timeout limi
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import cast
 from uuid import uuid4
 
+from article_reader.application.ports.cache import CachePolicy, StorageFullError
 from article_reader.application.ports.durable_audio import AudioPublicationError, DurableAudioStore
 from article_reader.application.ports.persistence import (
     ArticleDecisionRecord,
@@ -65,8 +68,16 @@ class SynthesisTimeoutError(RuntimeError):
     """Raised when one chunk's synthesis exceeds the configured timeout."""
 
 
+class WorkerStopping(RuntimeError):
+    """Stop waiting for native work; leave its durable lease recoverable on restart."""
+
+
 def _run_with_timeout[T](
-    function: Callable[[], T], *, timeout_seconds: float, description: str
+    function: Callable[[], T],
+    *,
+    timeout_seconds: float,
+    description: str,
+    stop_event: threading.Event | None = None,
 ) -> T:
     """Run ``function`` on a daemon thread and enforce a wall-clock timeout.
 
@@ -87,7 +98,11 @@ def _run_with_timeout[T](
 
     thread = threading.Thread(target=target, daemon=True, name=f"article-reader-{description}")
     thread.start()
-    thread.join(timeout_seconds)
+    deadline = time.monotonic() + timeout_seconds
+    while thread.is_alive() and time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            raise WorkerStopping()
+        thread.join(min(0.1, max(0, deadline - time.monotonic())))
     if thread.is_alive():
         raise SynthesisTimeoutError(f"{description} exceeded {timeout_seconds:g}s")
     result = outcome[0]
@@ -120,6 +135,7 @@ class WorkerLoop:
         engine_factory: Callable[[], SpeechEngine],
         audio_store: DurableAudioStore,
         settings: WorkerSettings,
+        cache_policy: CachePolicy | None = None,
     ) -> None:
         self._readings = readings
         self._articles = articles
@@ -131,6 +147,8 @@ class WorkerLoop:
         self._engine_factory = engine_factory
         self._audio_store = audio_store
         self._settings = settings
+        self._cache_policy = cache_policy
+        self._stop_event: threading.Event | None = None
 
     def run_once(self) -> bool:
         """Claim and fully execute at most one job. Returns whether one was found."""
@@ -138,22 +156,29 @@ class WorkerLoop:
         self._jobs.recover_interrupted(
             now=now_iso(), max_recoveries=self._settings.max_automatic_recoveries
         )
+        if self._cache_policy is not None:
+            self._cache_policy.maintain()
         token = uuid4().hex
         job = self._jobs.claim_next(
             worker_generation=token, now=now_iso(), lease_seconds=self._settings.lease_seconds
         )
         if job is None:
             return False
-        self._execute(job, token)
+        try:
+            self._execute(job, token)
+        finally:
+            if self._cache_policy is not None:
+                self._cache_policy.maintain()
         return True
 
     def run_forever(self, stop_event: threading.Event) -> None:
+        self._stop_event = stop_event
         while not stop_event.is_set():
             try:
                 processed = self.run_once()
             except Exception:
                 LOGGER.exception("Unhandled error in the durable worker loop")
-                processed = True  # avoid a tight crash loop; back off like an empty queue
+                processed = False  # Back off like an empty queue after an adapter failure.
             if not processed:
                 stop_event.wait(_CLAIM_POLL_SECONDS)
 
@@ -163,6 +188,8 @@ class WorkerLoop:
                 self._run_prepare(job, token)
             else:
                 self._run_synthesize(job, token)
+        except WorkerStopping:
+            return
         except Exception as error:
             LOGGER.exception("Job %s failed", job.job_id)
             if self._jobs.fail(
@@ -196,6 +223,8 @@ class WorkerLoop:
             requested_script=requested_script,
             accept_article_review=False,
         )
+        if self._stop_event is not None and self._stop_event.is_set():
+            raise WorkerStopping()
         if self._jobs.is_cancel_requested(job.job_id):
             if self._jobs.mark_cancelled(job.job_id, worker_generation=token, now=now_iso()):
                 self._readings.update_state(job.reading_id, ReadingState.CANCELLED)
@@ -280,7 +309,9 @@ class WorkerLoop:
 
         segments = self._articles.get_prepared_segments(rendition.article_id)
         already_published = {
-            chunk.ordinal for chunk in self._audio_chunks.list_for_rendition(rendition_id)
+            chunk.ordinal
+            for chunk in self._audio_chunks.list_for_rendition(rendition_id)
+            if chunk.state is ChunkState.READY
         }
 
         try:
@@ -325,17 +356,39 @@ class WorkerLoop:
                     return engine.synthesize(segment.speech_text, settings)
 
                 try:
-                    audio = _run_with_timeout(
-                        synthesize_current_segment,
-                        timeout_seconds=self._settings.chunk_timeout_seconds,
-                        description=f"chunk-{segment.ordinal}",
+                    # Conservative pre-synthesis reservation; actual PCM bytes resize it
+                    # before writing. This protects disk even for unusually slow speech.
+                    estimated_bytes = (
+                        int(voice.sample_rate_hz * 2 * max(5, len(segment.speech_text) / 8)) + 44
                     )
+                    reservation = (
+                        self._cache_policy.reserve(rendition_id, estimated_bytes)
+                        if self._cache_policy is not None
+                        else nullcontext()
+                    )
+                    with reservation:
+                        audio = _run_with_timeout(
+                            synthesize_current_segment,
+                            timeout_seconds=self._settings.chunk_timeout_seconds,
+                            description=f"chunk-{segment.ordinal}",
+                            stop_event=self._stop_event,
+                        )
+                        if self._cache_policy is not None:
+                            self._cache_policy.check_write(rendition_id, len(audio.pcm_bytes) + 44)
+                        staged = self._audio_store.stage(rendition_id, segment.ordinal, audio)
                 except SynthesisTimeoutError as error:
                     self._fail_synthesis(job, token, rendition_id, "SYNTHESIS_TIMEOUT", str(error))
                     return
 
-                try:
-                    staged = self._audio_store.stage(rendition_id, segment.ordinal, audio)
+                except StorageFullError as error:
+                    self._fail_synthesis(job, token, rendition_id, "STORAGE_FULL", str(error))
+                    return
+                except OSError as error:
+                    code = "STORAGE_FULL" if error.errno == errno.ENOSPC else "SYNTHESIS_FAILED"
+                    self._fail_synthesis(
+                        job, token, rendition_id, code, "Audio storage write failed."
+                    )
+                    return
                 except AudioPublicationError as error:
                     self._fail_synthesis(job, token, rendition_id, "SYNTHESIS_FAILED", str(error))
                     return
@@ -377,10 +430,15 @@ class WorkerLoop:
 
             if self._jobs.complete(job.job_id, worker_generation=token, now=now_iso()):
                 self._readings.update_state(job.reading_id, ReadingState.READY)
+        except WorkerStopping:
+            raise
         except Exception as error:
             self._fail_synthesis(job, token, rendition_id, "SYNTHESIS_FAILED", str(error)[:500])
         finally:
-            engine.close()
+            # A stopped native call may still own the engine. Process shutdown will
+            # reclaim it; calling close concurrently could free memory it is using.
+            if self._stop_event is None or not self._stop_event.is_set():
+                engine.close()
 
     def _fail_synthesis(
         self, job: JobRecord, token: str, rendition_id: str, error_code: str, message: str

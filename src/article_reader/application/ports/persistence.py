@@ -77,6 +77,8 @@ class ViewerSessionRecord:
     last_seen_at: str
     expires_at: str
     revoked_at: str | None = None
+    audience: str = "desktop_lan"
+    credential_revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

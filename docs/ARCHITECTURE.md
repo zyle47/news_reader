@@ -1,5 +1,17 @@
 # Architecture
 
+## Implemented Docker/onion extension
+
+The desktop/LAN architecture below remains supported. The standalone onion mode is defined in
+[TOR_ARCHITECTURE.md](TOR_ARCHITECTURE.md), with host evidence in
+[TOR_ACCEPTANCE.md](TOR_ACCEPTANCE.md), operation in [TOR_SETUP.md](TOR_SETUP.md), and tasks in
+[TOR_IMPLEMENTATION_PLAN.md](TOR_IMPLEMENTATION_PLAN.md). One Reader/Piper process and durable
+worker serve a Unix socket to an independent Tor container; no host web ports are published.
+Owner credentials/session audiences and cache leases are persisted in schema 3/4. The worker
+enforces audio/disk budgets, playback protection and physical cleanup. This is a distinct serving
+mode; desktop bootstrap and LAN pairing cannot grant onion access. Physical-phone acceptance
+remains open.
+
 ## Shape of the application
 
 Article Reader is a modular monolith. As of M4 it runs as one OS process containing an API/UI

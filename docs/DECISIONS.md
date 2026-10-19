@@ -480,6 +480,32 @@ waits honestly at an unavailable next chunk. A real LAN-IP browser run caught an
 secure-context `crypto.randomUUID` assumption; only a physical-phone pilot can establish device
 audio transition and sleep behavior.
 
+## ADR-027: Plan a standalone, explicitly authenticated onion deployment
+
+**Status:** Accepted and implemented, 2026-10-19; host trial verified, physical phone gate open.
+
+The owner requests access to Reader from a phone Tor browser via a new onion address on their
+existing host. [TOR_ARCHITECTURE.md](TOR_ARCHITECTURE.md) proposes a separate Compose project:
+one Reader/Piper service and one Tor service, HTTP over a shared Unix socket, persistent library
+and model volumes, and onion private keys mounted only into Tor.
+
+Add an explicit onion serving mode with owner authentication and no automatic local-session
+bootstrap. Preserve the default desktop mode and ADR-025's trusted-LAN rules. On 2026-10-19 the
+owner confirmed password login with remembered sessions and direct article fetching through the
+Reader container's normal internet connection. All onion sessions share one owner library and
+retain durable expiry/revocation; cookie clearing requires re-login, not a new library.
+The planned release also requires Linux container-safe locking and M5's
+storage/lease subset. Portable bundles and multi-process worker supervision remain separate.
+
+This proposal is the separate deployment/authentication design anticipated by the original
+internet-exposure exclusion; it does not silently expand LAN mode. It retains ADR-020's worker
+topology and ADR-021's native-call limitation. Its explicit onion transport decision is documented
+in the linked architecture; it does not claim confidentiality for ordinary LAN HTTP.
+
+Implementation sequencing, task ownership and verification are tracked in
+[TOR_IMPLEMENTATION_PLAN.md](TOR_IMPLEMENTATION_PLAN.md). Host evidence is recorded in [TOR_ACCEPTANCE.md](TOR_ACCEPTANCE.md);
+physical-phone acceptance remains separate.
+
 ## Open decisions
 
 - A verified authentic (non-Slovenian-derived) Serbian voice, if `sr-marko-medium` fails listening
@@ -487,9 +513,9 @@ audio transition and sleep behavior.
 - Cross-platform multi-*process* worker supervision (see ADR-020); the current single-process,
   single-thread worker plus `InstanceLock` covers the durability and single-ownership
   requirements but not fencing against a hand-rolled second process bypassing `serve`.
-- Audio cache eviction/LRU and disk-cap enforcement (project plan section 12) are not implemented;
-  M3 durable audio grows unbounded until a reading is explicitly deleted.
-- Whether a future internet-facing mode justifies trusted local HTTPS or a separately designed
-  authenticated deployment; current LAN HTTP is intentionally limited to trusted networks.
+- Portable reading bundles remain deferred. Audio LRU, disk caps and physical deletion cleanup
+  were implemented in T3 on 2026-10-19.
+- The implemented onion deployment in ADR-027 still needs real-phone cookie/playback validation;
+  current LAN HTTP remains intentionally limited to trusted networks.
 - Application release license, after dependency and model licenses are known (see ADR-009 for the
   Lessac-lineage caveat on the German voice).

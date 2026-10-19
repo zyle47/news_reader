@@ -1,0 +1,120 @@
+name: reader-onion
+
+x-reader: &reader-base
+  image: reader-onion-app:local
+  build:
+    context: .
+    args:
+      PYTHON_IMAGE: ${READER_PYTHON_IMAGE:-python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258}
+  user: "10001:10001"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=256m,mode=1777
+  pids_limit: 128
+  cpus: 2.0
+  mem_limit: 1536m
+  logging:
+    driver: json-file
+    options: {max-size: "5m", max-file: "3"}
+
+services:
+  init:
+    <<: *reader-base
+    user: "0:0"
+    entrypoint: [python, /app/deploy/init.py]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]
+    network_mode: none
+    volumes:
+      - data:/data
+      - models:/data/models
+      - tor-state:/var/lib/tor
+      - onion-info:/run/reader-onion
+      - http-socket:/run/reader-http
+    restart: "no"
+
+  reader:
+    <<: *reader-base
+    depends_on:
+      init: {condition: service_completed_successfully}
+    volumes:
+      - data:/data
+      - models:/data/models:ro
+      - onion-info:/run/reader-onion:ro
+      - http-socket:/run/reader-http
+    networks: [reader-egress]
+    restart: unless-stopped
+    stop_grace_period: 100s
+    healthcheck:
+      test: [CMD, python, /app/deploy/reader_health.py]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 75s
+
+  reader-tor:
+    image: reader-onion-tor:local
+    build: {context: ./deploy/tor}
+    user: "10002:10001"
+    init: true
+    depends_on:
+      init: {condition: service_completed_successfully}
+    volumes:
+      - tor-state:/var/lib/tor
+      - onion-info:/run/reader-onion
+      - http-socket:/run/reader-http:ro
+    networks: [tor-egress]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    cpus: 0.5
+    mem_limit: 256m
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "3"}
+    healthcheck:
+      test: [CMD, python3, /opt/tor/health.py]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+  admin:
+    <<: *reader-base
+    profiles: [tools]
+    stdin_open: true
+    tty: true
+    volumes:
+      - data:/data
+      - models:/data/models:ro
+      - onion-info:/run/reader-onion:ro
+    network_mode: none
+    restart: "no"
+    command: [owner, init]
+
+  models:
+    <<: *reader-base
+    profiles: [tools]
+    volumes:
+      - data:/data
+      - models:/data/models
+    networks: [reader-egress]
+    restart: "no"
+    command: [voices, list]
+
+volumes:
+  data:
+  models:
+  tor-state:
+  onion-info:
+  http-socket:
+
+networks:
+  reader-egress: {driver: bridge}
+  tor-egress: {driver: bridge}

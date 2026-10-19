@@ -2,7 +2,14 @@
 
 Version 2 · 9 September 2026 · Intended handoff for Codex, Claude, or a human developer.
 
-This document is the implementation brief. It consolidates the owner's decisions and supplies explicit defaults for the remaining engineering choices. The application has not been built or benchmarked. Commands, interfaces, schemas, and limits below are contracts to implement, not claims about existing software.
+This document is the original implementation brief. It consolidates the owner's decisions and supplies explicit defaults for the remaining engineering choices. At the time it was written, the application had not been built or benchmarked. Commands, interfaces, schemas, and limits below are baseline contracts, not claims about current software; later accepted decisions may supersede them.
+
+**Current navigation (2026-10-19):** M0–M4 are implemented; see [STATUS](docs/STATUS.md),
+[DECISIONS](docs/DECISIONS.md), and [HANDOFF](docs/HANDOFF.md). The new standalone Docker/onion
+extension is implemented and host-tested; see [TOR_SETUP](docs/TOR_SETUP.md),
+[TOR_ACCEPTANCE](docs/TOR_ACCEPTANCE.md), [TOR_ARCHITECTURE](docs/TOR_ARCHITECTURE.md) and
+[TOR_IMPLEMENTATION_PLAN](docs/TOR_IMPLEMENTATION_PLAN.md), with T0–T5 tasks distinct from the
+original M0–M5 roadmap. Its storage work advances part of M5; bundles remain later work.
 
 ## 1. Product and acceptance boundary
 

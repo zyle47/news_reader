@@ -78,7 +78,7 @@ def _is_windows_mapped_network_drive(path: Path) -> bool:
     if os.name != "nt" or not path.drive:
         return False
     try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)  # noqa: B009
         get_drive_type = kernel32.GetDriveTypeW
         get_drive_type.argtypes = [ctypes.c_wchar_p]
         get_drive_type.restype = ctypes.c_uint
@@ -187,10 +187,24 @@ class ServerSettings:
     bind: str = "127.0.0.1"
     port: int = 8765
     lan_mode: bool = False
+    onion_mode: bool = False
+    onion_hostname: str = ""
 
     def __post_init__(self) -> None:
         _require_int("server.port", self.port, minimum=1, maximum=65_535)
         _require_bool("server.lan_mode", self.lan_mode)
+        _require_bool("server.onion_mode", self.onion_mode)
+        if self.onion_mode:
+            from article_reader.security.onion import validate_onion_hostname
+
+            if self.lan_mode:
+                raise ConfigError("LAN and onion modes are mutually exclusive")
+            try:
+                validate_onion_hostname(self.onion_hostname)
+            except ValueError as error:
+                raise ConfigError(str(error)) from error
+        elif self.onion_hostname:
+            raise ConfigError("server.onion_hostname requires onion mode")
         loopback, wildcard = _classify_bind_host(self.bind)
         if wildcard and not self.lan_mode:
             raise ConfigError("server.bind wildcard addresses require server.lan_mode to be true")
@@ -518,6 +532,8 @@ _FIELD_KINDS: Final[dict[SettingPath, SettingKind]] = {
     ("server", "bind"): "str",
     ("server", "port"): "int",
     ("server", "lan_mode"): "bool",
+    ("server", "onion_mode"): "bool",
+    ("server", "onion_hostname"): "str",
     ("access", "session_lifetime_hours"): "int",
     ("access", "pairing_lifetime_seconds"): "int",
     ("access", "max_sessions_per_viewer"): "int",
@@ -738,6 +754,8 @@ def _build_settings(values: Mapping[SettingPath, object]) -> Settings:
             bind=_value(values, "server", "bind", str),
             port=_value(values, "server", "port", int),
             lan_mode=_value(values, "server", "lan_mode", bool),
+            onion_mode=_value(values, "server", "onion_mode", bool),
+            onion_hostname=_value(values, "server", "onion_hostname", str),
         ),
         access=AccessSettings(
             session_lifetime_hours=_value(values, "access", "session_lifetime_hours", int),

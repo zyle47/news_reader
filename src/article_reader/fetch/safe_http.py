@@ -149,6 +149,11 @@ def validate_article_url(url: str, *, max_characters: int) -> ValidatedTarget:
     if parsed.username is not None or parsed.password is not None:
         raise _url_error(FetchErrorCode.INVALID_URL, "article URL cannot contain credentials")
     hostname = _normalize_hostname(parsed)
+    if hostname.endswith(".onion") or hostname == "onion":
+        raise _url_error(
+            FetchErrorCode.BLOCKED_DESTINATION,
+            "Article fetching requires a public internet website.",
+        )
     port = explicit_port if explicit_port is not None else (443 if scheme == "https" else 80)
     if port not in {80, 443}:
         raise _url_error(FetchErrorCode.INVALID_URL, "article URL port must be 80 or 443")

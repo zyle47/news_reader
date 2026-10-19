@@ -12,11 +12,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from article_reader.application.ports.cache import CachePolicy, HistoryFullError
 from article_reader.application.ports.persistence import (
     ArticleDecisionRecord,
     ArticleRepository,
@@ -64,6 +66,7 @@ class ReadingServiceErrorCode(StrEnum):
     JOB_NOT_CANCELLABLE = "JOB_NOT_CANCELLABLE"
     JOB_NOT_RETRYABLE = "JOB_NOT_RETRYABLE"
     PROGRESS_CONFLICT = "PROGRESS_CONFLICT"
+    HISTORY_FULL = "HISTORY_FULL"
 
 
 class ReadingServiceError(RuntimeError):
@@ -139,6 +142,7 @@ class ReadingService:
         max_unfinished_per_viewer: int,
         max_waiting_chains: int,
         id_factory: Callable[[], str] = lambda: uuid4().hex,
+        cache_policy: CachePolicy | None = None,
     ) -> None:
         self._readings = readings
         self._articles = articles
@@ -153,6 +157,7 @@ class ReadingService:
         self._max_unfinished_per_viewer = max_unfinished_per_viewer
         self._max_waiting_chains = max_waiting_chains
         self._id_factory = id_factory
+        self._cache_policy = cache_policy
 
     def submit_reading(
         self,
@@ -213,7 +218,6 @@ class ReadingService:
             created_at=now,
             last_opened_at=now,
         )
-        self._readings.create(reading)
         job = JobRecord(
             job_id=job_id,
             kind=JobKind.PREPARE,
@@ -233,7 +237,17 @@ class ReadingService:
             created_at=now,
             updated_at=now,
         )
-        self._jobs.create(job)
+        admission = (
+            self._cache_policy.history_admission(viewer_id)
+            if self._cache_policy is not None
+            else nullcontext()
+        )
+        try:
+            with admission:
+                self._readings.create(reading)
+                self._jobs.create(job)
+        except HistoryFullError as error:
+            raise ReadingServiceError(ReadingServiceErrorCode.HISTORY_FULL, str(error)) from error
 
         if idempotency_key is not None:
             self._idempotency.create(

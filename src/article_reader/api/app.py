@@ -8,9 +8,11 @@ calls a speech engine: that work happens exclusively in the durable worker
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -28,10 +30,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from article_reader import __version__
 from article_reader.application.ports.durable_audio import DurableAudioStore
+from article_reader.application.ports.owner import OwnerAccessError
 from article_reader.application.ports.persistence import (
     ArticleDecisionRecord,
     ArticleRecord,
     AudioChunkRecord,
+    ChunkState,
     JobRecord,
     JobState,
     PreparedSegmentRecord,
@@ -43,6 +47,7 @@ from article_reader.application.services.access_control import (
     AccessErrorCode,
     AccessService,
 )
+from article_reader.application.services.owner_access import OwnerAccessService
 from article_reader.application.services.reading_service import (
     ReadingService,
     ReadingServiceError,
@@ -61,11 +66,14 @@ from article_reader.db.repositories import (
     SqliteRenditionRepository,
     SqliteViewerRepository,
 )
+from article_reader.db.repositories.owner import SqliteOwnerRepository
 from article_reader.domain.speech import Language, Script, VoiceSpec
 from article_reader.network import http_authority
 from article_reader.security.pairing_qr import pairing_qr_data_url
+from article_reader.security.passwords import Argon2PasswordHasher
 from article_reader.speech.model_store import ModelStore
 from article_reader.speech.registry import VoiceRegistry
+from article_reader.storage.cache_policy import AudioCachePolicy
 from article_reader.storage.durable_audio import LocalDurableAudioStore
 from article_reader.text.segment import RuleBasedTextPreparer
 
@@ -79,6 +87,7 @@ _CONTENT_SECURITY_POLICY = (
 )
 
 _ERROR_STATUS: dict[ReadingServiceErrorCode, int] = {
+    ReadingServiceErrorCode.HISTORY_FULL: 409,
     ReadingServiceErrorCode.INVALID_URL: 422,
     ReadingServiceErrorCode.NOT_FOUND: 404,
     ReadingServiceErrorCode.QUEUE_FULL: 429,
@@ -131,6 +140,13 @@ class RedeemPairingRequest(BaseModel):
 
     code: str = Field(min_length=1, max_length=32)
     label: str = Field(default="Paired device", max_length=80)
+
+
+class OwnerLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=1, max_length=256, repr=False)
+    label: str = Field(default="My phone", max_length=80)
 
 
 class ApiError(RuntimeError):
@@ -193,6 +209,40 @@ class LocalRequestBoundaryMiddleware:
                 )
                 await response(scope, receive, send)
                 return
+            # Bound before the framework buffers JSON, including chunked bodies.
+            body = bytearray()
+            try:
+                async with asyncio.timeout(15):
+                    while True:
+                        part = await receive()
+                        if part["type"] == "http.disconnect":
+                            return
+                        body.extend(part.get("body", b""))
+                        if len(body) > 8192:
+                            response = _error_response(
+                                413, "BODY_TOO_LARGE", "Request body is too large."
+                            )
+                            await response(scope, receive, send)
+                            return
+                        if not part.get("more_body", False):
+                            break
+            except TimeoutError:
+                await _error_response(408, "BODY_TIMEOUT", "Request body timed out.")(
+                    scope, receive, send
+                )
+                return
+
+            original_receive = receive
+            delivered = False
+
+            async def bounded_receive() -> Message:
+                nonlocal delivered
+                if not delivered:
+                    delivered = True
+                    return {"type": "http.request", "body": bytes(body), "more_body": False}
+                return await original_receive()
+
+            receive = bounded_receive
         await self._app(scope, receive, send)
 
 
@@ -224,6 +274,22 @@ class ResponseSecurityMiddleware:
             await send(message)
 
         await self._app(scope, receive, send_with_headers)
+
+
+class PinnedFileResponse(FileResponse):
+    """Release the active audio pin even when a client disconnects or sending fails."""
+
+    def __init__(
+        self, path: Path, pin: AbstractContextManager[None], *, headers: dict[str, str]
+    ) -> None:
+        super().__init__(path, media_type="audio/wav", headers=headers)
+        self._pin = pin
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._pin.__exit__(None, None, None)
 
 
 def _copy_cookies(source: Response, destination: Response) -> None:
@@ -283,6 +349,9 @@ def _request_boundary_values(
     settings: Settings, lan_address: str | None
 ) -> tuple[frozenset[str], frozenset[str]]:
     port = settings.server.port
+    if settings.server.onion_mode:
+        host = settings.server.onion_hostname
+        return frozenset({host, f"{host}:80"}), frozenset({f"http://{host}"})
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
     if settings.server.lan_mode:
         if lan_address is None:
@@ -370,7 +439,8 @@ def _manifest_document(
     segments: tuple[PreparedSegmentRecord, ...],
     chunks: tuple[AudioChunkRecord, ...],
 ) -> dict[str, object]:
-    chunk_by_ordinal = {chunk.ordinal: chunk for chunk in chunks}
+    chunk_by_ordinal = {chunk.ordinal: chunk for chunk in chunks if chunk.state is ChunkState.READY}
+    evicted_ordinals = {chunk.ordinal for chunk in chunks if chunk.state is ChunkState.EVICTED}
     ready_ordinals = frozenset(chunk_by_ordinal)
     chunk_documents = []
     for segment in segments:
@@ -378,7 +448,9 @@ def _manifest_document(
         chunk_documents.append(
             {
                 "ordinal": segment.ordinal,
-                "state": "ready" if published is not None else "pending",
+                "state": "ready"
+                if published is not None
+                else ("evicted" if segment.ordinal in evicted_ordinals else "pending"),
                 "speech_text": segment.speech_text,
                 "source_block_ordinals": list(segment.source_block_ordinals),
                 "includes_title": segment.includes_title,
@@ -445,32 +517,47 @@ def _is_loopback_request(request: Request) -> bool:
 
 def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
     response.set_cookie(
-        _VIEWER_COOKIE,
+        _cookie_name(settings),
         token,
         max_age=settings.access.session_lifetime_hours * 60 * 60,
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=settings.server.onion_mode,
         path="/",
     )
+
+
+def _cookie_name(settings: Settings) -> str:
+    return "article_reader_owner" if settings.server.onion_mode else _VIEWER_COOKIE
 
 
 def _resolve_access(
     request: Request,
     response: Response,
-    access: AccessService,
+    access: AccessService | OwnerAccessService,
     settings: Settings,
     *,
     required: bool,
 ) -> _AuthenticatedViewer | None:
-    session = access.authenticate(request.cookies.get(_VIEWER_COOKIE))
-    if session is None and (not settings.server.lan_mode or _is_loopback_request(request)):
+    session = access.authenticate(request.cookies.get(_cookie_name(settings)))
+    if (
+        session is None
+        and not settings.server.onion_mode
+        and (not settings.server.lan_mode or _is_loopback_request(request))
+    ):
+        assert isinstance(access, AccessService)
         issued = access.create_local_viewer_session()
         _set_session_cookie(response, issued.token, settings)
         session = issued.record
     if session is None:
         if required:
-            raise ApiError(401, "AUTHENTICATION_REQUIRED", "Pair this device to continue.")
+            raise ApiError(
+                401,
+                "AUTHENTICATION_REQUIRED",
+                "Sign in to continue."
+                if settings.server.onion_mode
+                else "Pair this device to continue.",
+            )
         return None
     return _AuthenticatedViewer(viewer_id=session.viewer_id, session_id=session.session_id)
 
@@ -487,6 +574,9 @@ def create_app(
     allowed_origins: frozenset[str] | None = None,
     lan_address: str | None = None,
     access_service: AccessService | None = None,
+    owner_service: OwnerAccessService | None = None,
+    readiness_checker: Callable[[], bool] | None = None,
+    cache_policy: AudioCachePolicy | None = None,
 ) -> FastAPI:
     """Compose the ASGI application around one shared durable database."""
 
@@ -520,8 +610,9 @@ def create_app(
         max_segment_characters=settings.speech.max_chunk_characters,
         max_unfinished_per_viewer=settings.worker.max_unfinished_request_chains_per_viewer,
         max_waiting_chains=settings.worker.max_waiting_chains,
+        cache_policy=cache_policy,
     )
-    access = access_service or AccessService(
+    local_access = access_service or AccessService(
         repos.viewers,
         session_lifetime_seconds=settings.access.session_lifetime_hours * 60 * 60,
         pairing_lifetime_seconds=settings.access.pairing_lifetime_seconds,
@@ -529,6 +620,15 @@ def create_app(
         max_pairing_attempts=settings.access.max_pairing_attempts,
         pairing_attempt_window_seconds=settings.access.pairing_attempt_window_seconds,
         pairing_block_seconds=settings.access.pairing_block_seconds,
+    )
+    owner_access = owner_service or OwnerAccessService(
+        SqliteOwnerRepository(database),
+        Argon2PasswordHasher(),
+        session_lifetime_seconds=settings.access.session_lifetime_hours * 3600,
+        max_sessions=settings.access.max_sessions_per_viewer,
+    )
+    access: AccessService | OwnerAccessService = (
+        owner_access if settings.server.onion_mode else local_access
     )
 
     site_directory = web_directory or _default_web_directory()
@@ -551,12 +651,15 @@ def create_app(
 
     async def api_error_handler(_request: Request, error: Exception) -> JSONResponse:
         assert isinstance(error, ApiError)
-        return _error_response(
+        response = _error_response(
             error.status_code,
             error.code,
             error.message,
             retryable=error.retryable,
         )
+        if error.code == "LOGIN_RATE_LIMITED":
+            response.headers["Retry-After"] = "60"
+        return response
 
     async def validation_error_handler(_request: Request, error: Exception) -> JSONResponse:
         assert isinstance(error, RequestValidationError)
@@ -579,7 +682,11 @@ def create_app(
         response = templates.TemplateResponse(
             request=request,
             name="index.html",
-            context={"app_version": __version__, "lan_mode": settings.server.lan_mode},
+            context={
+                "app_version": __version__,
+                "lan_mode": settings.server.lan_mode,
+                "onion_mode": settings.server.onion_mode,
+            },
         )
         _resolve_access(request, response, access, settings, required=False)
         return response
@@ -588,13 +695,16 @@ def create_app(
         return {
             "app_name": "Article Reader",
             "app_version": __version__,
-            "mode": "lan_paired" if settings.server.lan_mode else "loopback_durable",
+            "mode": "onion_owner"
+            if settings.server.onion_mode
+            else ("lan_paired" if settings.server.lan_mode else "loopback_durable"),
             "capabilities": {
                 "article_url": True,
                 "extracted_text_review": True,
                 "speech": True,
                 "durable_history": True,
                 "lan_access": settings.server.lan_mode,
+                "owner_login": settings.server.onion_mode,
             },
         }
 
@@ -624,14 +734,45 @@ def create_app(
         body: dict[str, object] = {
             "authenticated": authenticated is not None,
             "lan_mode": settings.server.lan_mode,
-            "loopback": _is_loopback_request(request) or not settings.server.lan_mode,
-            "transport_confidential": False,
+            "onion_mode": settings.server.onion_mode,
+            "loopback": not settings.server.onion_mode
+            and (_is_loopback_request(request) or not settings.server.lan_mode),
+            "transport_confidential": settings.server.onion_mode,
         }
         if authenticated is not None:
             body["session_id"] = authenticated.session_id
         final = JSONResponse(body)
         _copy_cookies(response, final)
         return final
+
+    def login(request: Request, payload: OwnerLoginRequest, response: Response) -> JSONResponse:
+        if not settings.server.onion_mode:
+            raise ApiError(404, "OWNER_LOGIN_DISABLED", "Owner login is not enabled.")
+        current = owner_access.authenticate(request.cookies.get(_cookie_name(settings)))
+        if current is not None:
+            return JSONResponse({"authenticated": True, "session_id": current.session_id})
+        try:
+            issued = owner_access.login(payload.password, payload.label)
+        except OwnerAccessError as error:
+            raise ApiError(
+                429 if error.rate_limited else (409 if error.session_limit else 401),
+                "LOGIN_RATE_LIMITED"
+                if error.rate_limited
+                else ("SESSION_LIMIT_REACHED" if error.session_limit else "LOGIN_REJECTED"),
+                str(error),
+                retryable=error.rate_limited,
+            ) from error
+        _set_session_cookie(response, issued.token, settings)
+        final = JSONResponse({"authenticated": True, "session_id": issued.record.session_id})
+        _copy_cookies(response, final)
+        return final
+
+    def live() -> dict[str, bool]:
+        return {"alive": True}
+
+    def ready() -> JSONResponse:
+        healthy = readiness_checker() if readiness_checker else True
+        return JSONResponse({"ready": healthy}, status_code=200 if healthy else 503)
 
     def create_pairing_offer(request: Request, response: Response) -> dict[str, object]:
         if not settings.server.lan_mode or lan_address is None:
@@ -643,7 +784,7 @@ def create_app(
                 "New device pairing can only be started from this computer.",
             )
         authenticated = _require_viewer(request, response)
-        offer = access.create_pairing(authenticated.viewer_id)
+        offer = local_access.create_pairing(authenticated.viewer_id)
         authority = http_authority(lan_address, settings.server.port)
         pairing_url = f"http://{authority}/#pair={offer.code}"
         return {
@@ -660,7 +801,7 @@ def create_app(
             raise ApiError(404, "LAN_MODE_DISABLED", "LAN pairing is not enabled.")
         client_key = request.client.host if request.client is not None else "unknown"
         try:
-            issued = access.redeem_pairing(
+            issued = local_access.redeem_pairing(
                 code=payload.code, label=payload.label, client_key=client_key
             )
         except AccessError as error:
@@ -704,14 +845,26 @@ def create_app(
             raise ApiError(404, "SESSION_NOT_FOUND", "This session is not available.")
         final = JSONResponse({"revoked": True, "session_id": session_id})
         if session_id == authenticated.session_id:
-            final.delete_cookie(_VIEWER_COOKIE, path="/", httponly=True, samesite="strict")
+            final.delete_cookie(
+                _cookie_name(settings),
+                path="/",
+                httponly=True,
+                samesite="strict",
+                secure=settings.server.onion_mode,
+            )
         return final
 
     def logout(request: Request, response: Response) -> Response:
         authenticated = _require_viewer(request, response)
         access.revoke_session(authenticated.viewer_id, authenticated.session_id)
         final = Response(status_code=204)
-        final.delete_cookie(_VIEWER_COOKIE, path="/", httponly=True, samesite="strict")
+        final.delete_cookie(
+            _cookie_name(settings),
+            path="/",
+            httponly=True,
+            samesite="strict",
+            secure=settings.server.onion_mode,
+        )
         return final
 
     def _reading_detail(
@@ -739,7 +892,8 @@ def create_app(
                 "total_chunks": latest.total_chunks,
                 "manifest_revision": latest.manifest_revision,
                 "ready_prefix_count": _ready_prefix_count(
-                    latest.total_chunks, frozenset(chunk.ordinal for chunk in chunks)
+                    latest.total_chunks,
+                    frozenset(chunk.ordinal for chunk in chunks if chunk.state is ChunkState.READY),
                 ),
             }
         job = _pick_relevant_job(repos.jobs.list_for_reading(reading_id))
@@ -864,6 +1018,17 @@ def create_app(
             raise ApiError(404, "JOB_NOT_FOUND", "This job is not available.")
         return _job_document(job)
 
+    def renew_lease(request: Request, response: Response, rendition_id: str) -> dict[str, bool]:
+        viewer_id = _require_viewer(request, response).viewer_id
+        rendition = repos.renditions.get(rendition_id)
+        if rendition is None or repos.readings.get_owned(rendition.reading_id, viewer_id) is None:
+            raise ApiError(404, "RENDITION_NOT_FOUND", "This rendition is not available.")
+        if cache_policy is None:
+            return {"renewed": True}
+        if not cache_policy.renew_playback(rendition_id):
+            raise ApiError(410, "AUDIO_EXPIRED", "Generate this audio again to listen.")
+        return {"renewed": True}
+
     def cancel_job(request: Request, response: Response, job_id: str) -> dict[str, object]:
         viewer_id = _require_viewer(request, response).viewer_id
         try:
@@ -930,36 +1095,47 @@ def create_app(
             raise ApiError(404, "AUDIO_NOT_FOUND", "This audio chunk is not available.")
         if ordinal < 0 or ordinal >= rendition.total_chunks:
             raise ApiError(404, "AUDIO_NOT_FOUND", "This audio chunk is not available.")
-        chunk = repos.audio_chunks.get(rendition_id, ordinal)
-        if chunk is None:
-            raise ApiError(
-                409, "AUDIO_NOT_READY", "This audio section has not finished generating yet."
-            )
-        if chunk.sha256 != sha256:
-            raise ApiError(404, "AUDIO_NOT_FOUND", "This audio chunk is not available.")
-        if chunk.state.value == "evicted":
-            raise ApiError(410, "AUDIO_EXPIRED", "This audio has expired and needs regeneration.")
+        pin = cache_policy.pin(rendition_id) if cache_policy else nullcontext()
         try:
+            pin.__enter__()
+        except FileNotFoundError as error:
+            raise ApiError(410, "AUDIO_EXPIRED", "Generate this audio again to listen.") from error
+        try:
+            chunk = repos.audio_chunks.get(rendition_id, ordinal)
+            if chunk is None:
+                raise ApiError(
+                    409, "AUDIO_NOT_READY", "This audio section has not finished generating yet."
+                )
+            if chunk.sha256 != sha256:
+                raise ApiError(404, "AUDIO_NOT_FOUND", "This audio chunk is not available.")
+            if chunk.state is ChunkState.EVICTED:
+                raise ApiError(
+                    410, "AUDIO_EXPIRED", "This audio has expired and needs regeneration."
+                )
             path = store.resolve(rendition_id, chunk.relative_path, chunk.sha256)
-        except ValueError as error:
-            raise ApiError(404, "AUDIO_NOT_FOUND", "This audio chunk is not available.") from error
-        if path is None:
-            raise ApiError(
-                410, "AUDIO_EXPIRED", "This audio file is missing and needs regeneration."
-            )
+            if path is None:
+                raise ApiError(
+                    410, "AUDIO_EXPIRED", "This audio file is missing and needs regeneration."
+                )
+        except BaseException:
+            pin.__exit__(None, None, None)
+            raise
         headers = {
             "Cache-Control": "private, max-age=3600, immutable",
             "Content-Disposition": "inline",
             "ETag": f'"{sha256}"',
             "X-Content-Type-Options": "nosniff",
         }
-        final = FileResponse(path, media_type="audio/wav", headers=headers)
+        final = PinnedFileResponse(path, pin, headers=headers)
         _copy_cookies(response, final)
         return final
 
     app.add_api_route("/", index, methods=["GET"], response_class=Response)
     app.add_api_route("/api/meta", meta, methods=["GET"])
     app.add_api_route("/api/auth", auth_status, methods=["GET"], response_class=JSONResponse)
+    app.add_api_route("/api/auth/login", login, methods=["POST"], response_class=JSONResponse)
+    app.add_api_route("/health/live", live, methods=["GET"])
+    app.add_api_route("/health/ready", ready, methods=["GET"], response_class=JSONResponse)
     app.add_api_route("/api/pairings", create_pairing_offer, methods=["POST"])
     app.add_api_route(
         "/api/pairings/redeem", redeem_pairing, methods=["POST"], response_class=JSONResponse
@@ -990,6 +1166,7 @@ def create_app(
     )
     app.add_api_route("/api/readings/{reading_id}/progress", save_progress, methods=["PUT"])
     app.add_api_route("/api/renditions/{rendition_id}/manifest", get_manifest, methods=["GET"])
+    app.add_api_route("/api/renditions/{rendition_id}/lease", renew_lease, methods=["POST"])
     app.add_api_route("/api/jobs/{job_id}", get_job, methods=["GET"])
     app.add_api_route("/api/jobs/{job_id}/cancel", cancel_job, methods=["POST"])
     app.add_api_route("/api/jobs/{job_id}/retry", retry_job, methods=["POST"])

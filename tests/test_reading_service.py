@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import itertools
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
+from article_reader.application.ports.cache import CachePolicy
 from article_reader.application.ports.persistence import (
     ArticleBlockRecord,
     ArticleDecisionRecord,
@@ -21,8 +25,11 @@ from article_reader.application.services.reading_service import (
     ReadingServiceErrorCode,
 )
 from article_reader.clock import now_iso
+from article_reader.db.connection import Database
+from article_reader.db.repositories.cache import SqliteCacheRepository
 from article_reader.domain.speech import Language, Script, VoiceEvaluationStatus, VoiceSpec
 from article_reader.speech.registry import VoiceRegistry
+from article_reader.storage.cache_policy import AudioCachePolicy
 from article_reader.text.segment import RuleBasedTextPreparer
 from tests.conftest import Repos, seed_reading, seed_viewer
 
@@ -81,6 +88,7 @@ def _service(
     is_installed: bool = True,
     max_unfinished_per_viewer: int = 1,
     max_waiting_chains: int = 10,
+    cache_policy: CachePolicy | None = None,
 ) -> ReadingService:
     return ReadingService(
         readings=repos.readings,
@@ -96,6 +104,7 @@ def _service(
         max_unfinished_per_viewer=max_unfinished_per_viewer,
         max_waiting_chains=max_waiting_chains,
         id_factory=lambda: f"id-{next(_ids)}",
+        cache_policy=cache_policy,
     )
 
 
@@ -111,6 +120,71 @@ def test_submit_reading_rejects_non_http_url(repos: Repos) -> None:
             idempotency_key=None,
         )
     assert excinfo.value.code is ReadingServiceErrorCode.INVALID_URL
+
+
+def test_history_limit_returns_actionable_error_without_allocating_job(
+    repos: Repos, database: Database, tmp_path: Path
+) -> None:
+    viewer = seed_viewer(repos)
+    seed_reading(repos, viewer, state=ReadingState.READY)
+    cache = AudioCachePolicy(
+        repository=SqliteCacheRepository(database),
+        audio_root=tmp_path / "audio",
+        max_audio_bytes=1000,
+        min_free_disk_bytes=0,
+        playback_lease_seconds=180,
+        max_saved_readings_per_viewer=1,
+    )
+    service = _service(repos, cache_policy=cache)
+    with pytest.raises(ReadingServiceError) as error:
+        service.submit_reading(
+            viewer_id=viewer,
+            url="https://example.com/another",
+            requested_language=None,
+            requested_script=None,
+            idempotency_key=None,
+        )
+    assert error.value.code is ReadingServiceErrorCode.HISTORY_FULL
+    assert repos.jobs.count_queued() == 0
+    assert len(repos.readings.list_for_viewer(viewer, limit=100)) == 1
+
+
+def test_simultaneous_submissions_cannot_exceed_history_limit(
+    repos: Repos, database: Database, tmp_path: Path
+) -> None:
+    viewer = seed_viewer(repos)
+    cache = AudioCachePolicy(
+        repository=SqliteCacheRepository(database),
+        audio_root=tmp_path / "audio",
+        max_audio_bytes=1000,
+        min_free_disk_bytes=0,
+        playback_lease_seconds=180,
+        max_saved_readings_per_viewer=1,
+    )
+    service = _service(repos, cache_policy=cache, max_unfinished_per_viewer=100)
+    start = threading.Barrier(8)
+
+    def submit(number: int) -> str:
+        start.wait(timeout=5)
+        try:
+            service.submit_reading(
+                viewer_id=viewer,
+                url=f"https://example.com/{number}",
+                requested_language=None,
+                requested_script=None,
+                idempotency_key=None,
+            )
+            return "created"
+        except ReadingServiceError as error:
+            return error.code.value
+        finally:
+            database.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(pool.map(submit, range(8)))
+    assert outcomes.count("created") == 1
+    assert outcomes.count("HISTORY_FULL") == 7
+    assert len(repos.readings.list_for_viewer(viewer, limit=100)) == 1
 
 
 def test_submit_reading_creates_reading_and_prepare_job(repos: Repos) -> None:

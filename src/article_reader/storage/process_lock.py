@@ -1,9 +1,12 @@
 """Single-instance process lock for one data directory, with stale-lock recovery.
 
-The project plan requires refusing a duplicate worker for the same data directory and
-recovering a lock left behind by a process that no longer exists, based on actual process
-ownership rather than lease expiry alone. This is a cooperative, best-effort guard (any
-process willing to delete the lock file can bypass it); it is not a security boundary.
+On Linux/POSIX uses a kernel-backed exclusive flock held open for the process lifetime;
+the kernel releases it automatically on process exit regardless of clean shutdown, making
+PID-namespace issues and stale-PID checks unnecessary.  The lock file inode is never
+unlinked on Linux so the kernel object remains stable across container restarts.
+
+On Windows falls back to the original O_CREAT|O_EXCL PID-file approach with explicit
+stale-lock recovery, preserving the existing desktop behaviour.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ def _process_is_alive(pid: int) -> bool:
         import ctypes
         from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         # ``HANDLE`` is pointer-sized (8 bytes on 64-bit Windows). Without explicit
         # argtypes/restype, ctypes assumes a 32-bit ``c_int`` return value and silently
         # truncates the real handle, which can misreport a dead PID as alive whenever the
@@ -80,14 +83,38 @@ class InstanceLock:
     def acquire(self) -> None:
         if self._handle is not None:
             return
-        self._try_acquire(allow_stale_recovery=True)
+        if sys.platform.startswith("win"):
+            self._acquire_windows(allow_stale_recovery=True)
+        else:
+            self._acquire_linux()
 
-    def _try_acquire(self, *, allow_stale_recovery: bool) -> None:
+    def _acquire_linux(self) -> None:
+        import fcntl
+
+        fd = os.open(self._path, os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise InstanceLockError(
+                    f"another Article Reader process already owns the data directory "
+                    f"{self._path.parent}; stop it first or choose a different --data-dir"
+                ) from None
+            # Truncate before writing so a longer previously-written PID leaves no tail bytes.
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._handle = fd
+
+    def _acquire_windows(self, *, allow_stale_recovery: bool) -> None:
         try:
             descriptor = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             if allow_stale_recovery and self._reap_if_stale():
-                self._try_acquire(allow_stale_recovery=False)
+                self._acquire_windows(allow_stale_recovery=False)
                 return
             raise InstanceLockError(
                 f"another Article Reader process already owns the data directory "
@@ -113,12 +140,17 @@ class InstanceLock:
         return True
 
     def release(self) -> None:
+        if self._handle is None:
+            return
         if self._handle is not None:
             with contextlib.suppress(OSError):
                 os.close(self._handle)
             self._handle = None
-        with contextlib.suppress(OSError):
-            self._path.unlink(missing_ok=True)
+        # On Linux the flock is released by closing the fd; the inode is kept so the
+        # kernel object remains stable.  On Windows the PID file is removed as before.
+        if sys.platform.startswith("win"):
+            with contextlib.suppress(OSError):
+                self._path.unlink(missing_ok=True)
 
     def __enter__(self) -> InstanceLock:
         self.acquire()

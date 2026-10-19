@@ -19,7 +19,7 @@ from article_reader.config import (
 def test_defaults_match_the_implementation_contract_and_are_immutable(tmp_path: Path) -> None:
     settings = load_settings(env={"LOCALAPPDATA": str(tmp_path)})
 
-    assert settings.paths.data_dir == tmp_path / "ArticleReader"
+    assert settings.paths.data_dir == default_data_dir(env={"LOCALAPPDATA": str(tmp_path)})
     assert settings.server.port == 8765
     assert settings.server.bind == "127.0.0.1"
     assert settings.server.lan_mode is False

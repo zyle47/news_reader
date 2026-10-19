@@ -444,8 +444,8 @@ def _windows_rss_bytes() -> int | None:
     try:
         counters = ProcessMemoryCounters()
         counters.cb = ctypes.sizeof(counters)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)  # noqa: B009
+        psapi = getattr(ctypes, "WinDLL")("psapi", use_last_error=True)  # noqa: B009
         kernel32.GetCurrentProcess.restype = ctypes.c_void_p
         psapi.GetProcessMemoryInfo.argtypes = [
             ctypes.c_void_p,
@@ -480,9 +480,7 @@ def _posix_rss_bytes() -> int | None:
     try:
         import resource
 
-        maximum_rss = int(
-            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # type: ignore[attr-defined]
-        )
+        maximum_rss = int(getattr(resource.getrusage(resource.RUSAGE_SELF), "ru_maxrss", 0))
         return maximum_rss if sys.platform == "darwin" else maximum_rss * 1024
     except (ImportError, OSError, ValueError):
         return None

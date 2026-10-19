@@ -1,6 +1,46 @@
 # AI handoff
 
-Updated: 2026-09-13
+Updated: 2026-10-19
+
+## Current priority: running standalone Reader onion trial
+
+T1–T4 are implemented and host-verified on Linux; T5 physical-phone acceptance remains open.
+Read [TOR_SETUP.md](TOR_SETUP.md) for operation/recovery, [TOR_ACCEPTANCE.md](TOR_ACCEPTANCE.md)
+for actual evidence, and [TOR_IMPLEMENTATION_PLAN.md](TOR_IMPLEMENTATION_PLAN.md) for task state.
+The running standalone Compose project is `reader-onion`, with no host web ports. Reader and Tor
+are healthy. A user `@reboot` cron entry now runs `deploy/start-on-boot.sh`; Docker/cron are enabled
+and active. The minimal-environment startup check passed without restarting either Reader service;
+no actual host reboot was performed. See `runtime/boot.log` and the runbook's startup section.
+The owner confirmed the app works; detailed physical-phone acceptance remains open.
+The public hostname can be displayed with `docker compose exec -T reader cat
+/run/reader-onion/hostname`. The generated initial owner password is in private, ignored
+`runtime/onion-initial-password.txt`; never paste it into handoffs/logs. Owner should change it.
+
+Current source includes explicit onion mode/UDS, Argon2id owner login, audience-separated secure
+cookies, durable throttle/session revocation, schema 3 owner credentials and schema 4 cache leases,
+Linux advisory ownership, capped storage/history/metadata, progressive protected audio, owner UI,
+container health/resource limits, and stopped backup/isolated restore tools. Desktop/LAN behavior
+is preserved. Normal article fetching uses the server's internet connection; Tor is inbound only.
+
+Verified: 453 pytest tests passed, two Windows-only cases skipped, five subtests; strict mypy,
+Ruff, GJS UI smoke, ten Claude harness tests, real cross-container lock/kill recovery, real Tor
+login/logout and public article→real Piper→authenticated Range/HEAD, all four voice/script samples,
+and stopped backup with unpublished restore preserving owner/audio hashes/Tor identity. See the
+report for precise limits. The physical phone and sustained background/audio conditions remain
+unverified. Portable bundles remain deferred.
+
+Codex integrated the upgrade; Claude resumed saved UUID `24e3353a-fcd6-404b-a2d3-5c8c9cf00712` and
+completed the lock. Sonnet was used because installed CLI 2.1.178 cannot run Opus 5.5. A broad
+Claude turn stalled without edits; packaging was completed by Codex. Reuse the same session via
+the launcher; [AI_COLLABORATION.md](AI_COLLABORATION.md) records scope. No application state,
+keys, models or passwords are committed. Changes are currently uncommitted in this checkout.
+
+Next: owner opens the onion address on the actual phone and records T5 browser cookie/playback
+checks. Do not mark that gate done based on the Python Tor-client smoke. For further changes,
+maintain one shared migration owner and exact file ownership. `django_chat` files/containers were
+not edited or restarted; its pre-existing staged CSS and untracked Claude command remain intact.
+
+The sections below describe the earlier M4 baseline and historical Windows evidence.
 
 ## Current boundary
 
@@ -67,7 +107,7 @@ Open the desktop URL, choose **Devices**, then scan/enter the five-minute one-ti
 panel revokes other browsers; **Disconnect** revokes the phone itself. Stop the process to end both
 listeners.
 
-## Verified state and next task
+## Verified M4 state and original next task
 
 See `docs/STATUS.md` for exact evidence. Real Windows dual-socket and separate-host browser pairing
 worked at `192.168.0.12`; a real paired API run fetched the Intermagazin Serbian/Cyrillic article
@@ -76,6 +116,6 @@ available, so do not convert browser evidence into a device claim. Final gates p
 strict typing, lint/format/JavaScript checks, locked offline sync/build, archive inspection, and a
 fresh wheel-only install plus loopback serve smoke test.
 
-Next: M5 whole-rendition LRU audio eviction with playback leases/disk thresholds, followed by
-bounded versioned reading-bundle export/import and the physical-phone/PC B pilot. Do not mix active
-SQLite files across PCs.
+The original next milestone was M5 whole-rendition LRU audio eviction with playback leases/disk
+thresholds, then reading-bundle export/import and the physical-phone/PC B pilot. The current
+priority is T1 above; T3 reuses that planned storage work. Do not mix active SQLite files across PCs.

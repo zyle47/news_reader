@@ -1,6 +1,29 @@
 # Implementation status
 
-Updated: 2026-09-13
+Updated: 2026-10-19
+
+## Docker/onion extension: implemented, running host trial
+
+T1–T4 implementation and Linux host verification are complete. A standalone `reader-onion`
+Compose project serves the owner library over a Unix socket to its own Tor service, without host
+web ports or chat changes. Owner password/session isolation, bounded durable login checks,
+storage/leases/cleanup, UI, provisioning, health and backup/restore are implemented.
+
+See [TOR_ACCEPTANCE.md](TOR_ACCEPTANCE.md) for exact evidence and remaining phone acceptance,
+[TOR_SETUP.md](TOR_SETUP.md) for operation, and [TOR_IMPLEMENTATION_PLAN.md](TOR_IMPLEMENTATION_PLAN.md)
+for tasks. Current gates: 453 tests passed, two Windows-only skips, five subtests; strict mypy,
+Ruff, GJS UI smoke and harness checks pass. A real Tor client completed login and article/audio
+Range/HEAD flow; all voices/both Serbian scripts synthesized inside Linux; isolated restore
+preserved owner login, ready audio hashes, ownership and public identity without publishing a clone.
+
+T5 is partial: physical-phone Secure cookie, listening, sustained buffering/background/network
+changes and shared-host usability remain unverified. Historical Windows results below retain
+their original dates. Portable reading bundles remain deferred.
+
+Boot follow-up: owner confirmed the app works. Added a verified user `@reboot` startup entry and
+`deploy/start-on-boot.sh`; Docker/cron are enabled and active. A minimal-environment invocation
+passed and kept both services healthy with unchanged container IDs/start times. Existing cron
+jobs were preserved and backed up. Host reboot itself was not performed; see TOR_SETUP.md.
 
 ## Current milestone
 
@@ -97,7 +120,8 @@ boundary; cleanup remains in `_run_serve`'s `finally` blocks.
   supervision remain unimplemented.
 - A genuinely hung Piper native call retains M3's accepted daemon-thread timeout limitation.
 
-## Next concrete milestone
+## Original M5 milestone (reprioritized)
 
-M5: implement whole-rendition LRU audio eviction with playback leases and disk/free-space caps,
-then bounded versioned reading-bundle export/import. Finish with the physical-phone and PC B pilot.
+The original M5 plan is whole-rendition LRU audio eviction with playback leases and disk/free-space
+caps, then bounded versioned reading-bundle export/import and the physical-phone/PC B pilot.
+The onion extension now starts with T1 and pulls the storage work into T3; see the linked task board.
